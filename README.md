@@ -272,6 +272,36 @@ npm run dev
 
 - `http://127.0.0.1:5173/`
 
+## GitHub Pages 배포
+
+이 저장소는 GitHub Actions로 GitHub Pages 배포가 가능하도록 설정되어 있습니다.
+
+워크플로우:
+
+- `.github/workflows/deploy-pages.yml`
+
+필수 GitHub Repository Secrets:
+
+```bash
+VITE_SUPABASE_URL
+VITE_SUPABASE_ANON_KEY
+```
+
+배포 조건:
+
+- `main` 브랜치 push 시 자동 배포
+- 또는 `workflow_dispatch`로 수동 실행
+
+예상 배포 주소:
+
+- `https://sanghakbae.github.io/policy-revision-mgmt-system/`
+
+GitHub Pages가 아직 안 뜨면 아래를 확인해야 합니다.
+
+- Repository `Settings > Pages`
+- Source가 `GitHub Actions`인지 확인
+- Repository Secrets에 `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`가 등록되어 있는지 확인
+
 ## 검증 명령
 
 ```bash
@@ -410,4 +440,3 @@ npm run build
 - AI 리포트 결과 저장 및 이력 관리
 - 선택된 법령 집합별 분석 결과 캐싱
 - 대형 문서 분석 시 chunking 전략
-
