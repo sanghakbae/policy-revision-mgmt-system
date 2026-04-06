@@ -236,7 +236,9 @@ function buildStoragePath(userId: string, originalFileName: string) {
     : originalFileName;
   const normalizedBase = baseName
     .normalize("NFKD")
-    .replace(/[^\x00-\x7F]/g, "")
+    .split("")
+    .filter((character) => character.charCodeAt(0) <= 0x7f)
+    .join("")
     .replace(/[^a-zA-Z0-9._-]+/g, "-")
     .replace(/-+/g, "-")
     .replace(/^-|-$/g, "")

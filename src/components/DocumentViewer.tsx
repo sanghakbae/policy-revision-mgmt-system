@@ -50,12 +50,14 @@ export function DocumentViewer({ documentId }: DocumentViewerProps) {
         <span className="muted-label">구조화 섹션</span>
         <div className="structured-section-table-wrap">
           {(() => {
-            const rows = orderStructuredSections(document.sections)
-              .map((section) => ({
-                id: section.id,
-                content: section.original_text,
-                ...toStructuredRow(section),
-              }));
+            const rows = collapseRepeatedHierarchyLabels(
+              orderStructuredSections(document.sections)
+                .map((section) => ({
+                  id: section.id,
+                  content: section.original_text,
+                  ...toStructuredRow(section),
+                })),
+            );
             const visibleColumns = getVisibleStructuredColumns(rows);
 
             return (
@@ -101,20 +103,13 @@ function toStructuredRow(section: DocumentDetail["sections"][number]) {
   const item = section.item_label ?? fallbackLabels.item ?? "";
   const subItem = section.sub_item_label ?? fallbackLabels.subItem ?? "";
 
-  switch (section.hierarchy_type) {
-    case "chapter":
-      return { chapter, article: "", paragraph: "", item: "", subItem: "" };
-    case "article":
-      return { chapter: "", article, paragraph: "", item: "", subItem: "" };
-    case "paragraph":
-      return { chapter: "", article: "", paragraph, item: "", subItem: "" };
-    case "item":
-      return { chapter: "", article: "", paragraph: "", item, subItem: "" };
-    case "sub_item":
-      return { chapter: "", article: "", paragraph: "", item: "", subItem };
-    case "document":
-      return { chapter: "", article: "", paragraph: "", item: "", subItem: "" };
-  }
+  return {
+    chapter,
+    article,
+    paragraph,
+    item,
+    subItem,
+  };
 }
 
 function parsePathDisplay(pathDisplay: string) {
@@ -323,4 +318,31 @@ function getStructuredKeyCellClass(value: string) {
   return value.trim().length > 0
     ? "structured-key-cell structured-key-cell-filled"
     : "structured-key-cell";
+}
+
+function collapseRepeatedHierarchyLabels(rows: StructuredRow[]) {
+  let previousChapter = "";
+  let previousArticle = "";
+
+  return rows.map((row) => {
+    const nextRow = { ...row };
+
+    if (nextRow.chapter && nextRow.chapter === previousChapter) {
+      nextRow.chapter = "";
+    } else if (nextRow.chapter) {
+      previousChapter = nextRow.chapter;
+    }
+
+    if (nextRow.article && nextRow.article === previousArticle) {
+      nextRow.article = "";
+    } else if (nextRow.article) {
+      previousArticle = nextRow.article;
+    }
+
+    if (row.chapter) {
+      previousArticle = row.article || "";
+    }
+
+    return nextRow;
+  });
 }

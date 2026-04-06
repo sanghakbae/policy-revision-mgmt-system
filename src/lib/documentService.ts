@@ -14,6 +14,20 @@ import type {
   LawVersionSummary,
 } from "../types";
 
+interface ComparisonRunMetaRow {
+  id: string;
+  source_document_version_id: string;
+  target_law_version_id: string;
+  policy_document_versions:
+    | {
+        document_id?: string;
+      }
+    | Array<{
+        document_id?: string;
+      }>
+    | null;
+}
+
 export async function uploadDocument(input: {
   file: File;
   title: string;
@@ -139,7 +153,7 @@ export async function listComparisonRuns(): Promise<ComparisonRunSummary[]> {
   }
 
   const runMetaById = new Map(
-    (runResponse.data ?? []).map((row: any) => [
+    ((runResponse.data ?? []) as ComparisonRunMetaRow[]).map((row) => [
       row.id,
       {
         document_id: Array.isArray(row.policy_document_versions)
@@ -211,6 +225,51 @@ export async function registerLawSource(input: {
     throw new Error(
       await getHttpErrorMessage(response, {
         stage: "register-law-source",
+        session,
+        userId: currentUser.id,
+      }),
+    );
+  }
+
+  return await response.json();
+}
+
+export async function uploadLawDocument(input: {
+  file: File;
+  sourceTitle?: string;
+  versionLabel?: string;
+  effectiveDate?: string;
+}) {
+  const session = await ensureAuthenticatedSession();
+  const currentUser = await ensureAuthenticatedUser(session.access_token);
+  const fileContentBase64 = await encodeFileAsBase64(input.file);
+  const rawText = isLegacyWordDocument(input.file.name)
+    ? ""
+    : await extractDocumentText(input.file);
+  const response = await fetch(buildFunctionUrl("register-law-source"), {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      apikey: import.meta.env.VITE_SUPABASE_ANON_KEY,
+      Authorization: `Bearer ${session.access_token}`,
+    },
+    body: JSON.stringify({
+      sourceType: "file",
+      sourceTitle: input.sourceTitle,
+      versionLabel: input.versionLabel,
+      effectiveDate: input.effectiveDate,
+      originalFileName: input.file.name,
+      fileContentBase64,
+      contentType: input.file.type || guessContentType(input.file.name),
+      rawText,
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(
+      await getHttpErrorMessage(response, {
+        stage: "upload-law-document",
+        fileName: input.file.name,
         session,
         userId: currentUser.id,
       }),
@@ -543,88 +602,33 @@ function normalizeAiRevisionGuidance(input: unknown): AiRevisionGuidance {
 
   return {
     summary: typeof source.summary === "string" ? source.summary : "AI 비교 결과 요약이 없습니다.",
-    additions: Array.isArray(source.additions) ? source.additions.map(normalizeItem) : [],
-    additions_empty_reason:
-      typeof source.additions_empty_reason === "string"
-        ? source.additions_empty_reason
-        : "추가 필요 항목이 없다고 판단한 상세 사유가 없습니다.",
-    removals: Array.isArray(source.removals) ? source.removals.map(normalizeItem) : [],
-    removals_empty_reason:
-      typeof source.removals_empty_reason === "string"
-        ? source.removals_empty_reason
-        : "불필요 항목이 없다고 판단한 상세 사유가 없습니다.",
+    revision_needed: typeof source.revision_needed === "boolean" ? source.revision_needed : false,
+    overall_comment:
+      typeof source.overall_comment === "string"
+        ? source.overall_comment
+        : "개정 필요 여부에 대한 종합 코멘트가 없습니다.",
+    why_revision_not_immediately_needed:
+      typeof source.why_revision_not_immediately_needed === "string"
+        ? source.why_revision_not_immediately_needed
+        : "즉시 개정 필요성이 낮은 이유에 대한 상세 설명이 없습니다.",
+    existing_policy_coverage: Array.isArray(source.existing_policy_coverage)
+      ? source.existing_policy_coverage.filter((entry): entry is string => typeof entry === "string")
+      : [],
+    remaining_watchpoints: Array.isArray(source.remaining_watchpoints)
+      ? source.remaining_watchpoints.filter((entry): entry is string => typeof entry === "string")
+      : [],
+    affected_documents: Array.isArray(source.affected_documents)
+      ? source.affected_documents.map(normalizeItem)
+      : [],
+    general_recommendations: Array.isArray(source.general_recommendations)
+      ? source.general_recommendations.filter((entry): entry is string => typeof entry === "string")
+      : [],
     low_confidence_notes: Array.isArray(source.low_confidence_notes)
       ? source.low_confidence_notes.filter((entry): entry is string => typeof entry === "string")
       : [],
     model: typeof source.model === "string" ? source.model : null,
     api_call_count: typeof source.api_call_count === "number" ? source.api_call_count : 0,
   };
-}
-
-async function getFunctionErrorMessage(
-  error: Error,
-  contextInfo?: {
-    stage: string;
-    fileName?: string;
-    session?: {
-      user: {
-        id?: string;
-      };
-      expires_at?: number;
-    } | null;
-    userId?: string;
-  },
-) {
-  const functionError = error as Error & {
-    context?: {
-      json?: () => Promise<unknown>;
-      text?: () => Promise<string>;
-    };
-  };
-  const debugPrefix = buildDebugPrefix(error.message, contextInfo);
-
-  const context = functionError.context;
-  if (!context) {
-    return debugPrefix;
-  }
-
-  try {
-    if (typeof context.json === "function") {
-      const payload = await context.json();
-      if (
-        payload &&
-        typeof payload === "object" &&
-        "error" in payload &&
-        typeof payload.error === "string"
-      ) {
-        return `${debugPrefix}\n서버 응답: ${payload.error}`;
-      }
-
-      if (
-        payload &&
-        typeof payload === "object" &&
-        "message" in payload &&
-        typeof payload.message === "string"
-      ) {
-        return `${debugPrefix}\n서버 응답: ${payload.message}`;
-      }
-    }
-  } catch {
-    // Fall through to text parsing.
-  }
-
-  try {
-    if (typeof context.text === "function") {
-      const text = await context.text();
-      if (text.trim()) {
-        return `${debugPrefix}\n서버 응답: ${text}`;
-      }
-    }
-  } catch {
-    // Keep the original error message.
-  }
-
-  return debugPrefix;
 }
 
 async function ensureAuthenticatedSession() {
@@ -676,6 +680,10 @@ async function encodeFileAsBase64(file: File) {
 }
 
 function guessContentType(fileName: string) {
+  if (fileName.toLowerCase().endsWith(".doc")) {
+    return "application/msword";
+  }
+
   if (fileName.toLowerCase().endsWith(".md")) {
     return "text/markdown";
   }
@@ -825,4 +833,8 @@ async function extractDocumentText(file: File) {
   }
 
   throw new Error("지원하지 않는 문서 형식입니다.");
+}
+
+function isLegacyWordDocument(fileName: string) {
+  return /\.(doc)$/iu.test(fileName);
 }

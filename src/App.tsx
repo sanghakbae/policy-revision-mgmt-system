@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 import { AuthPanel } from "./components/AuthPanel";
 import { ComparisonReviewPanel } from "./components/ComparisonReviewPanel";
-import { ComparisonRunList } from "./components/ComparisonRunList";
 import { DocumentList } from "./components/DocumentList";
 import { DocumentUploadForm } from "./components/DocumentUploadForm";
 import { DocumentViewer } from "./components/DocumentViewer";
@@ -13,6 +12,7 @@ import {
   listLawVersions,
   registerLawSource,
   runComparison,
+  uploadLawDocument,
   updateLawSource,
   uploadDocument,
 } from "./lib/documentService";
@@ -205,6 +205,35 @@ export default function App() {
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "법령 URL 등록 중 오류가 발생했습니다.";
+      setStatus(message);
+      throw error;
+    }
+  }
+
+  async function handleUploadLawDocument(input: {
+    file: File;
+    sourceTitle: string;
+    versionLabel: string;
+    effectiveDate: string;
+  }) {
+    setStatus("법령 첨부파일을 업로드하고 구조를 등록하는 중입니다...");
+
+    try {
+      await uploadLawDocument(input);
+      const lawVersionItems = await listLawVersions();
+      setLawVersions(lawVersionItems);
+      setSelectedLawVersionIds((current) => {
+        const preserved = current.filter((id) => lawVersionItems.some((item) => item.id === id));
+        if (preserved.length > 0) {
+          return preserved;
+        }
+
+        return lawVersionItems[0] ? [lawVersionItems[0].id] : [];
+      });
+      setStatus("법령 첨부파일 등록과 구조 파싱이 완료되었습니다.");
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "법령 첨부파일 등록 중 오류가 발생했습니다.";
       setStatus(message);
       throw error;
     }
@@ -450,11 +479,12 @@ export default function App() {
               selectedLawVersionIds={selectedLawVersionIds}
               disabled={!session || !isSupabaseConfigured}
               onToggleLawVersion={handleToggleLawVersion}
-            onRegisterLawSource={handleRegisterLawSource}
-            onUpdateLawSource={handleUpdateLawSource}
-            onDeleteLawSource={handleDeleteLawSource}
-            onRunComparison={handleRunComparison}
-          />
+              onRegisterLawSource={handleRegisterLawSource}
+              onUploadLawDocument={handleUploadLawDocument}
+              onUpdateLawSource={handleUpdateLawSource}
+              onDeleteLawSource={handleDeleteLawSource}
+              onRunComparison={handleRunComparison}
+            />
           </section>
         </div>
 

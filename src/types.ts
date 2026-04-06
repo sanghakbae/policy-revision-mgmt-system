@@ -149,10 +149,13 @@ export interface AiRevisionGuidanceItem {
 
 export interface AiRevisionGuidance {
   summary: string;
-  additions: AiRevisionGuidanceItem[];
-  additions_empty_reason: string;
-  removals: AiRevisionGuidanceItem[];
-  removals_empty_reason: string;
+  revision_needed: boolean;
+  overall_comment: string;
+  why_revision_not_immediately_needed: string;
+  existing_policy_coverage: string[];
+  remaining_watchpoints: string[];
+  affected_documents: AiRevisionGuidanceItem[];
+  general_recommendations: string[];
   low_confidence_notes: string[];
   model: string | null;
   api_call_count: number;

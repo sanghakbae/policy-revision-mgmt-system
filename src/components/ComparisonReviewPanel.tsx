@@ -31,6 +31,8 @@ export function ComparisonReviewPanel({
   const [detail, setDetail] = useState<ComparisonReviewDetail | null>(null);
   const [aggregate, setAggregate] = useState<ComparisonReviewAggregate | null>(null);
   const [aiGuidance, setAiGuidance] = useState<AiRevisionGuidance | null>(null);
+  const [aiAnalysisError, setAiAnalysisError] = useState<string | null>(null);
+  const [apiCallCount, setApiCallCount] = useState(0);
   const [isAnalyzingSelection, setIsAnalyzingSelection] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [isClassifying, setIsClassifying] = useState(false);
@@ -79,6 +81,7 @@ export function ComparisonReviewPanel({
   useEffect(() => {
     if (selectedDocumentIds.length === 0 || selectedLawVersionIds.length === 0) {
       setAiGuidance(null);
+      setAiAnalysisError(null);
       return;
     }
 
@@ -87,16 +90,20 @@ export function ComparisonReviewPanel({
     }
 
     setIsAnalyzingSelection(true);
+    setAiAnalysisError(null);
     analyzeSelectedRevisions({
       documentIds: selectedDocumentIds,
       lawVersionIds: selectedLawVersionIds,
     })
       .then((data) => {
         setAiGuidance(data);
+        setAiAnalysisError(null);
+        setApiCallCount((current) => current + data.api_call_count);
       })
       .catch((error: Error) => {
         setStatus(error.message);
         setAiGuidance(null);
+        setAiAnalysisError(error.message);
       })
       .finally(() => {
         setIsAnalyzingSelection(false);
@@ -144,7 +151,7 @@ export function ComparisonReviewPanel({
           <h2>비교 검토</h2>
           <p>선택된 정책·지침과 등록된 법령을 기준으로 종합 개정 검토 리포트를 표시합니다.</p>
         </div>
-        <AiGuidancePanel guidance={aiGuidance} isLoading={isAnalyzingSelection} className="ai-guidance-offset" />
+        <AiGuidancePanel guidance={aiGuidance} error={aiAnalysisError} isLoading={isAnalyzingSelection} className="ai-guidance-offset" />
       </div>
     );
   }
@@ -184,7 +191,7 @@ export function ComparisonReviewPanel({
           </div>
           <div className="info-card comparison-summary-box comparison-summary-box-api">
             <span className="muted-label">OpenAI API 호출</span>
-            <strong>{aiGuidance?.api_call_count ?? 0}건</strong>
+            <strong>{apiCallCount}건</strong>
           </div>
         </div>
 
@@ -199,7 +206,7 @@ export function ComparisonReviewPanel({
           </div>
         ) : null}
 
-        <AiGuidancePanel guidance={aiGuidance} isLoading={isAnalyzingSelection} className="ai-guidance-offset" />
+        <AiGuidancePanel guidance={aiGuidance} error={aiAnalysisError} isLoading={isAnalyzingSelection} className="ai-guidance-offset" />
       </div>
     );
   }
@@ -293,13 +300,14 @@ export function ComparisonReviewPanel({
         </p>
       </div>
 
-      <AiGuidancePanel guidance={aiGuidance} isLoading={isAnalyzingSelection} className="ai-guidance-offset" />
+      <AiGuidancePanel guidance={aiGuidance} error={aiAnalysisError} isLoading={isAnalyzingSelection} className="ai-guidance-offset" />
     </div>
   );
 }
 
 function AiGuidancePanel(input: {
   guidance: AiRevisionGuidance | null;
+  error: string | null;
   isLoading: boolean;
   className?: string;
 }) {
@@ -316,7 +324,14 @@ function AiGuidancePanel(input: {
         </div>
       ) : null}
 
-      {!input.isLoading && !input.guidance ? (
+      {!input.isLoading && input.error ? (
+        <div className="warning-card">
+          <strong>AI 비교 결과를 생성하지 못했습니다.</strong>
+          <p className="helper-text detailed-empty-reason">{input.error}</p>
+        </div>
+      ) : null}
+
+      {!input.isLoading && !input.guidance && !input.error ? (
         <div className="info-card">
           <strong>선택된 정책·지침과 법령을 고르면 AI 비교 결과가 여기에 표시됩니다.</strong>
         </div>
@@ -326,55 +341,82 @@ function AiGuidancePanel(input: {
         <div className="stack">
           <div className="recommendation-card ai-summary-card">
             <p className="recommendation-copy">{input.guidance.summary}</p>
+            <div className="pill-row">
+              <span className={`pill ${input.guidance.revision_needed ? "warning" : "success"}`}>
+                {input.guidance.revision_needed ? "개정 검토 필요" : "즉시 개정 필요성 낮음"}
+              </span>
+            </div>
+            <p className="recommendation-copy">{input.guidance.overall_comment}</p>
+            {!input.guidance.revision_needed ? (
+              <div className="info-card">
+                <strong>즉시 개정 필요성이 낮은 이유</strong>
+                <p className="helper-text detailed-empty-reason">
+                  {input.guidance.why_revision_not_immediately_needed}
+                </p>
+              </div>
+            ) : null}
+            {input.guidance.existing_policy_coverage.length > 0 ? (
+              <div className="info-card">
+                <strong>현재 정책·지침에서 이미 커버하는 내용</strong>
+                <ul className="plain-list">
+                  {input.guidance.existing_policy_coverage.map((item) => (
+                    <li key={item}>{item}</li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+            {input.guidance.remaining_watchpoints.length > 0 ? (
+              <div className="warning-card">
+                <strong>남아 있는 관찰 포인트</strong>
+                <ul className="plain-list">
+                  {input.guidance.remaining_watchpoints.map((item) => (
+                    <li key={item}>{item}</li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
             <p className="helper-text">
               모델: {input.guidance.model ?? "미기록"}
             </p>
+            <GuidanceSection
+              title="문서별 개정 코멘트"
+              emptyText="특정 문서별 코멘트가 없습니다."
+              emptyReason="선택된 정책 및 지침 전체 기준으로만 종합 판단이 생성되었습니다."
+              items={input.guidance.affected_documents.map((item, index) => ({
+                id: `affected-${item.document_id}-${index}`,
+                title: item.document_title,
+                targetPath: item.target_section_path,
+                lawTitle: item.law_title,
+                policyEvidence: item.policy_evidence_paths,
+                lawEvidence: item.law_evidence_paths,
+                action: item.suggested_action,
+                confidence: item.confidence,
+                reason: item.rationale,
+              }))}
+            />
+
+            {input.guidance.general_recommendations.length > 0 ? (
+              <div className="info-card">
+                <strong>종합 권고</strong>
+                <ul className="plain-list">
+                  {input.guidance.general_recommendations.map((item) => (
+                    <li key={item}>{item}</li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+
+            {input.guidance.low_confidence_notes.length > 0 ? (
+              <div className="warning-card">
+                <strong>저신뢰 메모</strong>
+                <ul className="plain-list">
+                  {input.guidance.low_confidence_notes.map((note) => (
+                    <li key={note}>{note}</li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
           </div>
-
-          <GuidanceSection
-            title="현행 정책에 추가해야 할 내용 및 근거"
-            emptyText="추가 필요 항목이 없습니다."
-            emptyReason={input.guidance.additions_empty_reason}
-            items={input.guidance.additions.map((item, index) => ({
-              id: `add-${item.document_id}-${index}`,
-              title: item.document_title,
-              targetPath: item.target_section_path,
-              lawTitle: item.law_title,
-              policyEvidence: item.policy_evidence_paths,
-              lawEvidence: item.law_evidence_paths,
-              action: item.suggested_action,
-              confidence: item.confidence,
-              reason: item.rationale,
-            }))}
-          />
-
-          <GuidanceSection
-            title="현행 정책에 불필요한 내용 및 근거"
-            emptyText="불필요 항목이 없습니다."
-            emptyReason={input.guidance.removals_empty_reason}
-            items={input.guidance.removals.map((item, index) => ({
-              id: `remove-${item.document_id}-${index}`,
-              title: item.document_title,
-              targetPath: item.target_section_path,
-              lawTitle: item.law_title,
-              policyEvidence: item.policy_evidence_paths,
-              lawEvidence: item.law_evidence_paths,
-              action: item.suggested_action,
-              confidence: item.confidence,
-              reason: item.rationale,
-            }))}
-          />
-
-          {input.guidance.low_confidence_notes.length > 0 ? (
-            <div className="warning-card">
-              <strong>저신뢰 메모</strong>
-              <ul className="plain-list">
-                {input.guidance.low_confidence_notes.map((note) => (
-                  <li key={note}>{note}</li>
-                ))}
-              </ul>
-            </div>
-          ) : null}
         </div>
       ) : null}
     </section>

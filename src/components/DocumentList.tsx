@@ -31,9 +31,6 @@ export function DocumentList({
           onClick={() => onToggleSelect(document.id)}
           type="button"
         >
-          <span className="muted-label">
-            버전 {document.version_number} · {document.document_type}
-          </span>
           <strong>{document.title}</strong>
           <span>구조 섹션 {document.section_count}건 저장됨</span>
           <span className="timestamp">

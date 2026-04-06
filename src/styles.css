@@ -223,9 +223,152 @@ textarea {
   gap: 10px;
 }
 
+.segmented-control {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 10px;
+  width: 100%;
+}
+
+.registration-launcher {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 10px;
+  width: 100%;
+  margin-bottom: 2px;
+}
+
+.registration-launch-card {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  min-height: 112px;
+  padding: 14px 16px;
+  border-radius: 14px;
+  border: 1px solid rgba(24, 53, 44, 0.1);
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.97), rgba(240, 248, 244, 0.94));
+  color: #18352c;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    transform 160ms ease,
+    border-color 160ms ease,
+    box-shadow 160ms ease,
+    background 160ms ease;
+  box-shadow: 0 12px 26px rgba(15, 62, 43, 0.08);
+}
+
+.registration-launch-card strong {
+  font-size: 16px;
+  line-height: 1.35;
+}
+
+.registration-launch-card .helper-text {
+  margin: 0;
+  white-space: normal;
+  word-break: keep-all;
+}
+
+.registration-launch-card:hover:not(:disabled) {
+  transform: translateY(-1px);
+  border-color: rgba(19, 138, 91, 0.22);
+  box-shadow: 0 16px 30px rgba(19, 138, 91, 0.12);
+}
+
+.registration-launch-card:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.registration-launch-label {
+  display: inline-flex;
+  align-items: center;
+  padding: 5px 8px;
+  border-radius: 999px;
+  background: rgba(19, 138, 91, 0.1);
+  color: #0f6a46;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+}
+
+.law-version-meta-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+}
+
+.law-source-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 3px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.law-source-badge.url {
+  background: rgba(19, 138, 91, 0.1);
+  color: #0f6a46;
+}
+
+.law-source-badge.file {
+  background: rgba(24, 53, 44, 0.08);
+  color: #1d5442;
+}
+
+.segment-button {
+  width: 100%;
+  min-height: 46px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(24, 53, 44, 0.12);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.94), rgba(240, 248, 244, 0.96));
+  color: #1d5442;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  transition:
+    transform 160ms ease,
+    border-color 160ms ease,
+    box-shadow 160ms ease,
+    background 160ms ease,
+    color 160ms ease;
+  box-shadow: 0 10px 22px rgba(15, 62, 43, 0.08);
+  white-space: normal;
+}
+
+.segment-button.active {
+  border-color: rgba(19, 138, 91, 0.36);
+  background:
+    linear-gradient(135deg, rgba(223, 255, 238, 0.98), rgba(240, 255, 248, 0.98));
+  color: #0f6a46;
+  box-shadow: 0 14px 28px rgba(19, 138, 91, 0.14);
+}
+
+.segment-button:hover:not(:disabled) {
+  transform: translateY(-1px);
+  border-color: rgba(19, 138, 91, 0.26);
+}
+
+.segment-button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
 .law-list {
-  max-height: 260px;
-  overflow: auto;
+  max-height: none;
+  overflow: visible;
 }
 
 .status-panel,
@@ -345,6 +488,7 @@ textarea {
 }
 
 .button {
+  width: auto;
   border: none;
   border-radius: 10px;
   padding: 6px 8px;
@@ -357,6 +501,10 @@ textarea {
     transform 160ms ease,
     background 160ms ease;
   box-shadow: 0 8px 18px rgba(19, 138, 91, 0.22);
+}
+
+.form-action-row .button {
+  width: 100%;
 }
 
 .button.secondary {
@@ -565,12 +713,12 @@ textarea {
 }
 
 .compact {
-  max-height: 360px;
+  max-height: none;
 }
 
 .source-block {
-  max-height: 540px;
-  overflow: auto;
+  max-height: none;
+  overflow: visible;
   white-space: pre-wrap;
   font-family:
     "KoPubDotum",
@@ -609,7 +757,7 @@ textarea {
 }
 
 .structured-section-table-wrap {
-  overflow: auto;
+  overflow: visible;
   margin-top: 4px;
 }
 

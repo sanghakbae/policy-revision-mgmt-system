@@ -1,6 +1,8 @@
 import { useState } from "react";
 import type { DocumentSummary, LawVersionSummary } from "../types";
 
+type RegistrationMode = "url" | "file";
+
 interface LawSourcePanelProps {
   documents: DocumentSummary[];
   selectedDocumentCount: number;
@@ -10,6 +12,12 @@ interface LawSourcePanelProps {
   onToggleLawVersion: (lawVersionId: string) => void;
   onRegisterLawSource: (input: {
     sourceLink: string;
+    sourceTitle: string;
+    versionLabel: string;
+    effectiveDate: string;
+  }) => Promise<void>;
+  onUploadLawDocument: (input: {
+    file: File;
     sourceTitle: string;
     versionLabel: string;
     effectiveDate: string;
@@ -33,14 +41,18 @@ export function LawSourcePanel({
   disabled,
   onToggleLawVersion,
   onRegisterLawSource,
+  onUploadLawDocument,
   onUpdateLawSource,
   onDeleteLawSource,
   onRunComparison,
 }: LawSourcePanelProps) {
+  const [isRegistrationOpen, setIsRegistrationOpen] = useState(false);
+  const [registrationMode, setRegistrationMode] = useState<RegistrationMode>("url");
   const [sourceLink, setSourceLink] = useState("");
   const [sourceTitle, setSourceTitle] = useState("");
   const [versionLabel, setVersionLabel] = useState("");
   const [effectiveDate, setEffectiveDate] = useState("");
+  const [sourceFile, setSourceFile] = useState<File | null>(null);
   const [isRegistering, setIsRegistering] = useState(false);
   const [isComparing, setIsComparing] = useState(false);
   const [editingLawVersionId, setEditingLawVersionId] = useState<string | null>(null);
@@ -48,6 +60,7 @@ export function LawSourcePanel({
 
   async function handleRegister(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    const form = event.currentTarget;
     setIsRegistering(true);
 
     try {
@@ -60,18 +73,38 @@ export function LawSourcePanel({
           effectiveDate,
         });
       } else {
-        await onRegisterLawSource({
-          sourceLink,
-          sourceTitle,
-          versionLabel,
-          effectiveDate,
-        });
+        if (registrationMode === "file") {
+          if (!sourceFile) {
+            return;
+          }
+
+          await onUploadLawDocument({
+            file: sourceFile,
+            sourceTitle,
+            versionLabel,
+            effectiveDate,
+          });
+        } else {
+          await onRegisterLawSource({
+            sourceLink,
+            sourceTitle,
+            versionLabel,
+            effectiveDate,
+          });
+        }
       }
       setSourceLink("");
       setSourceTitle("");
       setVersionLabel("");
       setEffectiveDate("");
+      setSourceFile(null);
       setEditingLawVersionId(null);
+      setIsRegistrationOpen(false);
+      setRegistrationMode("url");
+      const fileInput = form.elements.namedItem("law-file") as HTMLInputElement | null;
+      if (fileInput) {
+        fileInput.value = "";
+      }
     } finally {
       setIsRegistering(false);
     }
@@ -88,19 +121,25 @@ export function LawSourcePanel({
   }
 
   function handleStartEdit(lawVersion: LawVersionSummary) {
+    setIsRegistrationOpen(true);
     setEditingLawVersionId(lawVersion.id);
+    setRegistrationMode("url");
     setSourceLink(lawVersion.source_link);
     setSourceTitle(lawVersion.source_title ?? "");
     setVersionLabel(lawVersion.version_label ?? "");
     setEffectiveDate(lawVersion.effective_date ?? "");
+    setSourceFile(null);
   }
 
   function handleCancelEdit() {
     setEditingLawVersionId(null);
+    setIsRegistrationOpen(false);
+    setRegistrationMode("url");
     setSourceLink("");
     setSourceTitle("");
     setVersionLabel("");
     setEffectiveDate("");
+    setSourceFile(null);
   }
 
   async function handleDelete(lawVersionId: string) {
@@ -115,69 +154,141 @@ export function LawSourcePanel({
   return (
     <div className="stack">
       <div className="section-header">
-        <h2>법령 URL 등록 · 비교 실행</h2>
-        <p>파일 URL이 우선이면 다운로드하고, 아니면 본문을 추출해 구조화한 뒤 비교합니다.</p>
+        <h2>법령 등록 · 비교 실행</h2>
+        <p>법령 URL 또는 첨부파일에서 본문을 구조화해 비교 대상으로 등록합니다.</p>
       </div>
 
-      <form className="stack" onSubmit={handleRegister}>
-        <label className="field">
-          <span>법령 URL</span>
-          <input
-            value={sourceLink}
-            onChange={(event) => setSourceLink(event.target.value)}
-            placeholder="https://www.law.go.kr/..."
-            disabled={disabled || isRegistering}
-          />
-        </label>
-        <label className="field">
-          <span>표시 제목</span>
-          <input
-            value={sourceTitle}
-            onChange={(event) => setSourceTitle(event.target.value)}
-            placeholder="예: 개인정보보호법"
-            disabled={disabled || isRegistering}
-          />
-        </label>
-        <div className="inline-fields">
-          <label className="field">
-            <span>버전 라벨</span>
-            <input
-              value={versionLabel}
-              onChange={(event) => setVersionLabel(event.target.value)}
-              placeholder="예: 2026-04 개정"
-              disabled={disabled || isRegistering}
-            />
-          </label>
-          <label className="field">
-            <span>시행일</span>
-            <input
-              type="date"
-              value={effectiveDate}
-              onChange={(event) => setEffectiveDate(event.target.value)}
-              disabled={disabled || isRegistering}
-            />
-          </label>
-        </div>
-        <button className="button" type="submit" disabled={disabled || isRegistering}>
-          {isRegistering
-            ? editingLawVersionId
-              ? "법령 수정 중..."
-              : "법령 등록 중..."
-            : editingLawVersionId
-              ? "법령 수정 저장"
-              : "법령 URL 등록"}
-        </button>
-        {editingLawVersionId ? (
+      {!editingLawVersionId && !isRegistrationOpen ? (
+        <div className="registration-launcher" role="group" aria-label="법령 등록 시작">
           <button
-            className="button ghost"
             type="button"
+            className="registration-launch-card"
             disabled={disabled || isRegistering}
-            onClick={handleCancelEdit}
+            onClick={() => {
+              setRegistrationMode("url");
+              setIsRegistrationOpen(true);
+            }}
           >
-            수정 취소
+            <span className="registration-launch-label">URL 등록</span>
+            <strong>법령 URL로 본문 수집</strong>
+            <span className="helper-text">
+              law.go.kr 등 허용된 법령 주소에서 원문을 가져와 구조화합니다.
+            </span>
           </button>
-        ) : null}
-      </form>
+          <button
+            type="button"
+            className="registration-launch-card"
+            disabled={disabled || isRegistering}
+            onClick={() => {
+              setRegistrationMode("file");
+              setIsRegistrationOpen(true);
+            }}
+          >
+            <span className="registration-launch-label">첨부파일 등록</span>
+            <strong>파일 업로드로 법령 등록</strong>
+            <span className="helper-text">
+              보유 중인 텍스트 또는 Word 문서를 바로 비교 대상으로 올립니다.
+            </span>
+          </button>
+        </div>
+      ) : (
+        <form className="stack" onSubmit={handleRegister}>
+          {!editingLawVersionId ? (
+            <div className="segmented-control" role="tablist" aria-label="법령 등록 방식">
+              <button
+                type="button"
+                className={`segment-button ${registrationMode === "url" ? "active" : ""}`}
+                disabled={disabled || isRegistering}
+                onClick={() => setRegistrationMode("url")}
+              >
+                URL 등록
+              </button>
+              <button
+                type="button"
+                className={`segment-button ${registrationMode === "file" ? "active" : ""}`}
+                disabled={disabled || isRegistering}
+                onClick={() => setRegistrationMode("file")}
+              >
+                첨부파일 등록
+              </button>
+            </div>
+          ) : null}
+
+          {registrationMode === "file" && !editingLawVersionId ? (
+            <label className="field">
+              <span>법령 파일</span>
+              <input
+                id="law-file"
+                name="law-file"
+                type="file"
+                accept=".txt,.md,.doc,.docx,text/plain,text/markdown,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                onChange={(event) => setSourceFile(event.target.files?.[0] ?? null)}
+                disabled={disabled || isRegistering}
+              />
+            </label>
+          ) : (
+            <label className="field">
+              <span>법령 URL</span>
+              <input
+                value={sourceLink}
+                onChange={(event) => setSourceLink(event.target.value)}
+                placeholder="https://www.law.go.kr/..."
+                disabled={disabled || isRegistering}
+              />
+            </label>
+          )}
+          <label className="field">
+            <span>표시 제목</span>
+            <input
+              value={sourceTitle}
+              onChange={(event) => setSourceTitle(event.target.value)}
+              placeholder="예: 개인정보보호법"
+              disabled={disabled || isRegistering}
+            />
+          </label>
+          <div className="inline-fields">
+            <label className="field">
+              <span>버전 라벨</span>
+              <input
+                value={versionLabel}
+                onChange={(event) => setVersionLabel(event.target.value)}
+                placeholder="예: 2026-04 개정"
+                disabled={disabled || isRegistering}
+              />
+            </label>
+            <label className="field">
+              <span>시행일</span>
+              <input
+                type="date"
+                value={effectiveDate}
+                onChange={(event) => setEffectiveDate(event.target.value)}
+                disabled={disabled || isRegistering}
+              />
+            </label>
+          </div>
+          <div className="inline-fields form-action-row">
+            <button className="button" type="submit" disabled={disabled || isRegistering}>
+              {isRegistering
+                ? editingLawVersionId
+                  ? "법령 수정 중..."
+                  : "법령 등록 중..."
+                : editingLawVersionId
+                  ? "법령 수정 저장"
+                  : registrationMode === "file"
+                    ? "법령 파일 등록"
+                    : "법령 URL 등록"}
+            </button>
+            <button
+              className="button ghost"
+              type="button"
+              disabled={disabled || isRegistering}
+              onClick={handleCancelEdit}
+            >
+              {editingLawVersionId ? "수정 취소" : "등록 취소"}
+            </button>
+          </div>
+        </form>
+      )}
 
       <div className="stack">
         <div className="info-card">
@@ -202,12 +313,16 @@ export function LawSourcePanel({
               >
                 <div className="list-item-row">
                   <div className="stack list-item-copy">
-                    <span className="muted-label">
-                      {lawVersion.version_label ?? "버전 정보 없음"}
-                      {lawVersion.effective_date ? ` · ${lawVersion.effective_date}` : ""}
-                    </span>
+                    <div className="law-version-meta-row">
+                      <span className="muted-label">
+                        {formatLawVersionMeta(lawVersion)}
+                      </span>
+                      <span className={`law-source-badge ${lawVersion.source_link.startsWith("storage://") ? "file" : "url"}`}>
+                        {lawVersion.source_link.startsWith("storage://") ? "첨부파일" : "URL"}
+                      </span>
+                    </div>
                     <strong>{lawVersion.source_title ?? "법령 원문"}</strong>
-                    <span>구조 섹션 {lawVersion.section_count}건 저장됨</span>
+                    <span className="helper-text">{formatSectionSummary(lawVersion.section_count)}</span>
                   </div>
                   <button
                     type="button"
@@ -254,4 +369,28 @@ export function LawSourcePanel({
       </div>
     </div>
   );
+}
+
+function formatLawVersionMeta(lawVersion: LawVersionSummary) {
+  if (lawVersion.version_label && lawVersion.effective_date) {
+    return `${lawVersion.version_label} · 시행일 ${lawVersion.effective_date}`;
+  }
+
+  if (lawVersion.version_label) {
+    return lawVersion.version_label;
+  }
+
+  if (lawVersion.effective_date) {
+    return `시행일 ${lawVersion.effective_date}`;
+  }
+
+  return "버전 미지정";
+}
+
+function formatSectionSummary(sectionCount: number) {
+  if (sectionCount <= 1) {
+    return `구조 섹션 ${sectionCount}건`;
+  }
+
+  return `구조 섹션 ${sectionCount}건 저장됨`;
 }

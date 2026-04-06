@@ -5,7 +5,7 @@ type ManageLawSourceRequest =
   | {
       action: "update";
       lawVersionId: string;
-      sourceLink: string;
+      sourceLink?: string;
       sourceTitle?: string;
       versionLabel?: string;
       effectiveDate?: string | null;
@@ -74,12 +74,16 @@ Deno.serve(async (request) => {
     }
 
     if (body.action === "update") {
-      const sourceUrl = validateAllowedSourceUrl(body.sourceLink);
+      const nextSourceLink = body.sourceLink?.startsWith("storage://")
+        ? body.sourceLink
+        : body.sourceLink?.trim()
+          ? validateAllowedSourceUrl(body.sourceLink).toString()
+          : lawSource.source_link;
 
       const { error: sourceUpdateError } = await supabase
         .from("policy_law_sources")
         .update({
-          source_link: sourceUrl.toString(),
+          source_link: nextSourceLink,
           source_title: body.sourceTitle?.trim() || null,
         })
         .eq("id", lawVersion.law_source_id);
