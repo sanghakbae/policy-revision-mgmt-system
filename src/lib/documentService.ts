@@ -451,7 +451,42 @@ export async function analyzeSelectedRevisions(input: {
   }
 
   const payload = await response.json();
-  return payload.data as AiRevisionGuidance;
+  return normalizeAiRevisionGuidance(payload.data);
+}
+
+function normalizeAiRevisionGuidance(input: unknown): AiRevisionGuidance {
+  const source = (input && typeof input === "object" ? input : {}) as Record<string, unknown>;
+  const normalizeItem = (value: unknown) => {
+    const item = (value && typeof value === "object" ? value : {}) as Record<string, unknown>;
+    return {
+      document_id: typeof item.document_id === "string" ? item.document_id : "",
+      document_title: typeof item.document_title === "string" ? item.document_title : "정책/지침",
+      target_section_path:
+        typeof item.target_section_path === "string" ? item.target_section_path : "미지정",
+      law_title: typeof item.law_title === "string" ? item.law_title : "법령",
+      policy_evidence_paths: Array.isArray(item.policy_evidence_paths)
+        ? item.policy_evidence_paths.filter((entry): entry is string => typeof entry === "string")
+        : [],
+      law_evidence_paths: Array.isArray(item.law_evidence_paths)
+        ? item.law_evidence_paths.filter((entry): entry is string => typeof entry === "string")
+        : [],
+      rationale: typeof item.rationale === "string" ? item.rationale : "",
+      confidence: typeof item.confidence === "number" ? item.confidence : 0,
+      suggested_action:
+        typeof item.suggested_action === "string" ? item.suggested_action : "",
+    };
+  };
+
+  return {
+    summary: typeof source.summary === "string" ? source.summary : "AI 비교 결과 요약이 없습니다.",
+    additions: Array.isArray(source.additions) ? source.additions.map(normalizeItem) : [],
+    removals: Array.isArray(source.removals) ? source.removals.map(normalizeItem) : [],
+    low_confidence_notes: Array.isArray(source.low_confidence_notes)
+      ? source.low_confidence_notes.filter((entry): entry is string => typeof entry === "string")
+      : [],
+    model: typeof source.model === "string" ? source.model : null,
+    api_call_count: typeof source.api_call_count === "number" ? source.api_call_count : 0,
+  };
 }
 
 async function getFunctionErrorMessage(
