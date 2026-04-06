@@ -14,6 +14,14 @@ interface LawSourcePanelProps {
     versionLabel: string;
     effectiveDate: string;
   }) => Promise<void>;
+  onUpdateLawSource: (input: {
+    lawVersionId: string;
+    sourceLink: string;
+    sourceTitle: string;
+    versionLabel: string;
+    effectiveDate: string;
+  }) => Promise<void>;
+  onDeleteLawSource: (lawVersionId: string) => Promise<void>;
   onRunComparison: () => Promise<void>;
 }
 
@@ -25,6 +33,8 @@ export function LawSourcePanel({
   disabled,
   onToggleLawVersion,
   onRegisterLawSource,
+  onUpdateLawSource,
+  onDeleteLawSource,
   onRunComparison,
 }: LawSourcePanelProps) {
   const [sourceLink, setSourceLink] = useState("");
@@ -33,22 +43,35 @@ export function LawSourcePanel({
   const [effectiveDate, setEffectiveDate] = useState("");
   const [isRegistering, setIsRegistering] = useState(false);
   const [isComparing, setIsComparing] = useState(false);
+  const [editingLawVersionId, setEditingLawVersionId] = useState<string | null>(null);
+  const [isMutatingLawVersionId, setIsMutatingLawVersionId] = useState<string | null>(null);
 
   async function handleRegister(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setIsRegistering(true);
 
     try {
-      await onRegisterLawSource({
-        sourceLink,
-        sourceTitle,
-        versionLabel,
-        effectiveDate,
-      });
+      if (editingLawVersionId) {
+        await onUpdateLawSource({
+          lawVersionId: editingLawVersionId,
+          sourceLink,
+          sourceTitle,
+          versionLabel,
+          effectiveDate,
+        });
+      } else {
+        await onRegisterLawSource({
+          sourceLink,
+          sourceTitle,
+          versionLabel,
+          effectiveDate,
+        });
+      }
       setSourceLink("");
       setSourceTitle("");
       setVersionLabel("");
       setEffectiveDate("");
+      setEditingLawVersionId(null);
     } finally {
       setIsRegistering(false);
     }
@@ -61,6 +84,31 @@ export function LawSourcePanel({
       await onRunComparison();
     } finally {
       setIsComparing(false);
+    }
+  }
+
+  function handleStartEdit(lawVersion: LawVersionSummary) {
+    setEditingLawVersionId(lawVersion.id);
+    setSourceLink(lawVersion.source_link);
+    setSourceTitle(lawVersion.source_title ?? "");
+    setVersionLabel(lawVersion.version_label ?? "");
+    setEffectiveDate(lawVersion.effective_date ?? "");
+  }
+
+  function handleCancelEdit() {
+    setEditingLawVersionId(null);
+    setSourceLink("");
+    setSourceTitle("");
+    setVersionLabel("");
+    setEffectiveDate("");
+  }
+
+  async function handleDelete(lawVersionId: string) {
+    setIsMutatingLawVersionId(lawVersionId);
+    try {
+      await onDeleteLawSource(lawVersionId);
+    } finally {
+      setIsMutatingLawVersionId(null);
     }
   }
 
@@ -111,8 +159,24 @@ export function LawSourcePanel({
           </label>
         </div>
         <button className="button" type="submit" disabled={disabled || isRegistering}>
-          {isRegistering ? "법령 등록 중..." : "법령 URL 등록"}
+          {isRegistering
+            ? editingLawVersionId
+              ? "법령 수정 중..."
+              : "법령 등록 중..."
+            : editingLawVersionId
+              ? "법령 수정 저장"
+              : "법령 URL 등록"}
         </button>
+        {editingLawVersionId ? (
+          <button
+            className="button ghost"
+            type="button"
+            disabled={disabled || isRegistering}
+            onClick={handleCancelEdit}
+          >
+            수정 취소
+          </button>
+        ) : null}
       </form>
 
       <div className="stack">
@@ -151,6 +215,22 @@ export function LawSourcePanel({
                     onClick={() => onToggleLawVersion(lawVersion.id)}
                   >
                     {selectedLawVersionIds.includes(lawVersion.id) ? "해제" : "선택"}
+                  </button>
+                  <button
+                    type="button"
+                    className="button ghost select-button"
+                    disabled={disabled || isRegistering || isMutatingLawVersionId === lawVersion.id}
+                    onClick={() => handleStartEdit(lawVersion)}
+                  >
+                    수정
+                  </button>
+                  <button
+                    type="button"
+                    className="button ghost select-button"
+                    disabled={disabled || isRegistering || isMutatingLawVersionId === lawVersion.id}
+                    onClick={() => handleDelete(lawVersion.id)}
+                  >
+                    {isMutatingLawVersionId === lawVersion.id ? "삭제 중..." : "삭제"}
                   </button>
                 </div>
               </div>

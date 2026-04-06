@@ -150,7 +150,9 @@ export interface AiRevisionGuidanceItem {
 export interface AiRevisionGuidance {
   summary: string;
   additions: AiRevisionGuidanceItem[];
+  additions_empty_reason: string;
   removals: AiRevisionGuidanceItem[];
+  removals_empty_reason: string;
   low_confidence_notes: string[];
   model: string | null;
   api_call_count: number;

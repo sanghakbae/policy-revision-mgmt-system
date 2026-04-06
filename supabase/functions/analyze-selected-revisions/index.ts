@@ -254,6 +254,8 @@ async function analyzeWithOpenAi(input: {
         "Every item must name the affected internal document and the target internal section path.",
         "Use target_section_path to say where the reviewer should add, revise, or remove content. If no exact child section exists, use the nearest valid parent path from the supplied internal sections.",
         "Separate policy evidence paths from law evidence paths.",
+        "Even when additions is empty, you must explain in detail why no additional internal policy content is currently required.",
+        "Even when removals is empty, you must explain in detail why no existing internal policy content appears unnecessary.",
         "Do not make unsupported legal claims.",
         "If evidence is weak, reduce confidence and add a low confidence note.",
       ].join(" "),
@@ -297,6 +299,7 @@ async function analyzeWithOpenAi(input: {
                   ],
                 },
               },
+              additions_empty_reason: { type: "string" },
               removals: {
                 type: "array",
                 items: {
@@ -326,12 +329,20 @@ async function analyzeWithOpenAi(input: {
                   ],
                 },
               },
+              removals_empty_reason: { type: "string" },
               low_confidence_notes: {
                 type: "array",
                 items: { type: "string" },
               },
             },
-            required: ["summary", "additions", "removals", "low_confidence_notes"],
+            required: [
+              "summary",
+              "additions",
+              "additions_empty_reason",
+              "removals",
+              "removals_empty_reason",
+              "low_confidence_notes",
+            ],
           },
         },
       },

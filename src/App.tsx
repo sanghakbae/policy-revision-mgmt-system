@@ -7,11 +7,13 @@ import { DocumentUploadForm } from "./components/DocumentUploadForm";
 import { DocumentViewer } from "./components/DocumentViewer";
 import { LawSourcePanel } from "./components/LawSourcePanel";
 import {
+  deleteLawSource,
   listComparisonRuns,
   listDocuments,
   listLawVersions,
   registerLawSource,
   runComparison,
+  updateLawSource,
   uploadDocument,
 } from "./lib/documentService";
 import {
@@ -203,6 +205,48 @@ export default function App() {
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "법령 URL 등록 중 오류가 발생했습니다.";
+      setStatus(message);
+      throw error;
+    }
+  }
+
+  async function handleUpdateLawSource(input: {
+    lawVersionId: string;
+    sourceLink: string;
+    sourceTitle: string;
+    versionLabel: string;
+    effectiveDate: string;
+  }) {
+    setStatus("법령 정보를 수정하는 중입니다...");
+
+    try {
+      await updateLawSource(input);
+      const lawVersionItems = await listLawVersions();
+      setLawVersions(lawVersionItems);
+      setSelectedLawVersionIds((current) =>
+        current.filter((id) => lawVersionItems.some((item) => item.id === id)),
+      );
+      setStatus("법령 정보 수정이 완료되었습니다.");
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "법령 수정 중 오류가 발생했습니다.";
+      setStatus(message);
+      throw error;
+    }
+  }
+
+  async function handleDeleteLawSource(lawVersionId: string) {
+    setStatus("법령을 삭제하는 중입니다...");
+
+    try {
+      await deleteLawSource({ lawVersionId });
+      const lawVersionItems = await listLawVersions();
+      setLawVersions(lawVersionItems);
+      setSelectedLawVersionIds((current) => current.filter((id) => id !== lawVersionId));
+      setStatus("법령 삭제가 완료되었습니다.");
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "법령 삭제 중 오류가 발생했습니다.";
       setStatus(message);
       throw error;
     }
@@ -406,9 +450,11 @@ export default function App() {
               selectedLawVersionIds={selectedLawVersionIds}
               disabled={!session || !isSupabaseConfigured}
               onToggleLawVersion={handleToggleLawVersion}
-              onRegisterLawSource={handleRegisterLawSource}
-              onRunComparison={handleRunComparison}
-            />
+            onRegisterLawSource={handleRegisterLawSource}
+            onUpdateLawSource={handleUpdateLawSource}
+            onDeleteLawSource={handleDeleteLawSource}
+            onRunComparison={handleRunComparison}
+          />
           </section>
         </div>
 

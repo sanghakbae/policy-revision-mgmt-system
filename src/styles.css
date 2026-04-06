@@ -472,7 +472,7 @@ textarea {
 
 .comparison-summary-strip {
   display: grid;
-  grid-template-columns: minmax(0, 0.9fr) auto minmax(0, 1.1fr);
+  grid-template-columns: minmax(0, 0.9fr) auto minmax(0, 1.1fr) minmax(120px, 0.45fr);
   gap: 8px;
   align-items: stretch;
 }
@@ -511,6 +511,16 @@ textarea {
 
 .comparison-summary-box-law strong {
   color: #1c4f84;
+}
+
+.comparison-summary-box-api {
+  background:
+    linear-gradient(135deg, rgba(245, 244, 255, 0.98), rgba(255, 255, 255, 0.9));
+  border-color: rgba(90, 86, 181, 0.16);
+}
+
+.comparison-summary-box-api strong {
+  color: #463fa2;
 }
 
 .comparison-summary-vs {
@@ -777,6 +787,11 @@ textarea {
 
 .guidance-card p {
   margin: 0;
+}
+
+.detailed-empty-reason {
+  margin-top: 6px;
+  white-space: pre-wrap;
 }
 
 .document-viewer .info-card,

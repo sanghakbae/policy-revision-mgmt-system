@@ -182,6 +182,10 @@ export function ComparisonReviewPanel({
             <span className="muted-label">법령</span>
             <strong>{aggregate.law_titles.join(", ")}</strong>
           </div>
+          <div className="info-card comparison-summary-box comparison-summary-box-api">
+            <span className="muted-label">OpenAI API 호출</span>
+            <strong>{aiGuidance?.api_call_count ?? 0}건</strong>
+          </div>
         </div>
 
         {aggregate.warning_messages.length > 0 ? (
@@ -323,13 +327,14 @@ function AiGuidancePanel(input: {
           <div className="recommendation-card ai-summary-card">
             <p className="recommendation-copy">{input.guidance.summary}</p>
             <p className="helper-text">
-              모델: {input.guidance.model ?? "미기록"} · OpenAI API 호출 {input.guidance.api_call_count}건
+              모델: {input.guidance.model ?? "미기록"}
             </p>
           </div>
 
           <GuidanceSection
             title="현행 정책에 추가해야 할 내용 및 근거"
             emptyText="추가 필요 항목이 없습니다."
+            emptyReason={input.guidance.additions_empty_reason}
             items={input.guidance.additions.map((item, index) => ({
               id: `add-${item.document_id}-${index}`,
               title: item.document_title,
@@ -346,6 +351,7 @@ function AiGuidancePanel(input: {
           <GuidanceSection
             title="현행 정책에 불필요한 내용 및 근거"
             emptyText="불필요 항목이 없습니다."
+            emptyReason={input.guidance.removals_empty_reason}
             items={input.guidance.removals.map((item, index) => ({
               id: `remove-${item.document_id}-${index}`,
               title: item.document_title,
@@ -390,6 +396,7 @@ type GuidanceItem = {
 function GuidanceSection(input: {
   title: string;
   emptyText: string;
+  emptyReason: string;
   items: GuidanceItem[];
 }) {
   return (
@@ -400,6 +407,7 @@ function GuidanceSection(input: {
       {input.items.length === 0 ? (
         <div className="info-card">
           <strong>{input.emptyText}</strong>
+          <p className="helper-text detailed-empty-reason">{input.emptyReason}</p>
         </div>
       ) : (
         <div className="stack">

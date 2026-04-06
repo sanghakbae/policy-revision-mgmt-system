@@ -220,6 +220,70 @@ export async function registerLawSource(input: {
   return await response.json();
 }
 
+export async function updateLawSource(input: {
+  lawVersionId: string;
+  sourceLink: string;
+  sourceTitle?: string;
+  versionLabel?: string;
+  effectiveDate?: string;
+}) {
+  const session = await ensureAuthenticatedSession();
+  const currentUser = await ensureAuthenticatedUser(session.access_token);
+  const response = await fetch(buildFunctionUrl("manage-law-source"), {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      apikey: import.meta.env.VITE_SUPABASE_ANON_KEY,
+      Authorization: `Bearer ${session.access_token}`,
+    },
+    body: JSON.stringify({
+      action: "update",
+      ...input,
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(
+      await getHttpErrorMessage(response, {
+        stage: "update-law-source",
+        session,
+        userId: currentUser.id,
+      }),
+    );
+  }
+
+  return await response.json();
+}
+
+export async function deleteLawSource(input: { lawVersionId: string }) {
+  const session = await ensureAuthenticatedSession();
+  const currentUser = await ensureAuthenticatedUser(session.access_token);
+  const response = await fetch(buildFunctionUrl("manage-law-source"), {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      apikey: import.meta.env.VITE_SUPABASE_ANON_KEY,
+      Authorization: `Bearer ${session.access_token}`,
+    },
+    body: JSON.stringify({
+      action: "delete",
+      ...input,
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(
+      await getHttpErrorMessage(response, {
+        stage: "delete-law-source",
+        session,
+        userId: currentUser.id,
+      }),
+    );
+  }
+
+  return await response.json();
+}
+
 export async function runComparison(input: {
   documentVersionId: string;
   lawVersionId: string;
@@ -480,7 +544,15 @@ function normalizeAiRevisionGuidance(input: unknown): AiRevisionGuidance {
   return {
     summary: typeof source.summary === "string" ? source.summary : "AI 비교 결과 요약이 없습니다.",
     additions: Array.isArray(source.additions) ? source.additions.map(normalizeItem) : [],
+    additions_empty_reason:
+      typeof source.additions_empty_reason === "string"
+        ? source.additions_empty_reason
+        : "추가 필요 항목이 없다고 판단한 상세 사유가 없습니다.",
     removals: Array.isArray(source.removals) ? source.removals.map(normalizeItem) : [],
+    removals_empty_reason:
+      typeof source.removals_empty_reason === "string"
+        ? source.removals_empty_reason
+        : "불필요 항목이 없다고 판단한 상세 사유가 없습니다.",
     low_confidence_notes: Array.isArray(source.low_confidence_notes)
       ? source.low_confidence_notes.filter((entry): entry is string => typeof entry === "string")
       : [],
