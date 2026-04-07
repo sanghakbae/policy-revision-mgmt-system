@@ -209,7 +209,7 @@ export async function getLawDetail(
     supabase
       .from("policy_law_sections")
       .select(
-        "id, hierarchy_type, hierarchy_label, hierarchy_order, original_text, path_display, chapter_label, chapter_text, article_label, article_text, paragraph_label, paragraph_text, item_label, item_text, sub_item_label, sub_item_text",
+        "id, hierarchy_type, hierarchy_label, hierarchy_order, original_text, path_display",
       )
       .eq("law_version_id", lawVersionId)
       .order("hierarchy_order", { ascending: true }),
