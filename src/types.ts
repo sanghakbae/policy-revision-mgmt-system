@@ -27,6 +27,36 @@ export interface LawVersionSummary {
   section_count: number;
 }
 
+export interface LawSectionRecord {
+  id: string;
+  hierarchy_type: HierarchyType;
+  hierarchy_label: string;
+  hierarchy_order: number;
+  original_text: string;
+  path_display: string;
+  chapter_label?: string | null;
+  chapter_text?: string | null;
+  article_label?: string | null;
+  article_text?: string | null;
+  paragraph_label?: string | null;
+  paragraph_text?: string | null;
+  item_label?: string | null;
+  item_text?: string | null;
+  sub_item_label?: string | null;
+  sub_item_text?: string | null;
+}
+
+export interface LawDetail {
+  id: string;
+  source_title: string | null;
+  source_link: string;
+  version_label: string | null;
+  effective_date: string | null;
+  raw_text: string;
+  parse_warnings: string[];
+  sections: LawSectionRecord[];
+}
+
 export interface DocumentSectionRecord {
   id: string;
   hierarchy_type: HierarchyType;

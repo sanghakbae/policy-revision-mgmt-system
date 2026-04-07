@@ -5,6 +5,7 @@ import { DocumentList } from "./components/DocumentList";
 import { DocumentUploadForm } from "./components/DocumentUploadForm";
 import { DocumentViewer } from "./components/DocumentViewer";
 import { LawSourcePanel } from "./components/LawSourcePanel";
+import { LawVersionPreview } from "./components/LawVersionPreview";
 import {
   deleteLawSource,
   listComparisonRuns,
@@ -493,6 +494,7 @@ export default function App() {
               onDeleteLawSource={handleDeleteLawSource}
               onRunComparison={handleRunComparison}
             />
+            <LawVersionPreview lawVersionId={selectedLawVersionIds[0] ?? null} />
           </section>
         </div>
 

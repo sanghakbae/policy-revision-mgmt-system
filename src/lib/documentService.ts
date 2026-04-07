@@ -11,6 +11,7 @@ import type {
   ComparisonRunSummary,
   DocumentDetail,
   DocumentSummary,
+  LawDetail,
   LawVersionSummary,
 } from "../types";
 
@@ -38,14 +39,9 @@ export async function uploadDocument(input: {
     const currentUser = await ensureAuthenticatedUser(session.access_token);
     const fileContentBase64 = await encodeFileAsBase64(input.file);
     const fileText = await extractDocumentText(input.file);
-    const response = await fetch(buildFunctionUrl("register-document"), {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        apikey: import.meta.env.VITE_SUPABASE_ANON_KEY,
-        Authorization: `Bearer ${session.access_token}`,
-      },
-      body: JSON.stringify({
+    return await invokeEdgeFunction(
+      "register-document",
+      {
         title: input.title,
         description: input.description,
         documentType: "POLICY",
@@ -53,21 +49,14 @@ export async function uploadDocument(input: {
         fileContentBase64,
         contentType: input.file.type || guessContentType(input.file.name),
         rawText: fileText,
-      }),
-    });
-
-    if (!response.ok) {
-      throw new Error(
-        await getHttpErrorMessage(response, {
-          stage: "edge-function",
-          fileName: input.file.name,
-          session,
-          userId: currentUser.id,
-        }),
-      );
-    }
-
-    return await response.json();
+      },
+      {
+        stage: "edge-function",
+        fileName: input.file.name,
+        session,
+        userId: currentUser.id,
+      },
+    );
   } catch (error) {
     if (error instanceof Error) {
       throw error;
@@ -203,6 +192,55 @@ export async function listLawVersions(): Promise<LawVersionSummary[]> {
   });
 }
 
+export async function getLawDetail(
+  lawVersionId: string,
+): Promise<LawDetail> {
+  await ensureAuthenticatedSession();
+  const supabase = getSupabaseClient();
+
+  const [versionResponse, sectionResponse] = await Promise.all([
+    supabase
+      .from("policy_law_versions")
+      .select(
+        "id, version_label, effective_date, raw_text, parse_warnings, policy_law_sources!inner(source_title, source_link)",
+      )
+      .eq("id", lawVersionId)
+      .single(),
+    supabase
+      .from("policy_law_sections")
+      .select(
+        "id, hierarchy_type, hierarchy_label, hierarchy_order, original_text, path_display, chapter_label, chapter_text, article_label, article_text, paragraph_label, paragraph_text, item_label, item_text, sub_item_label, sub_item_text",
+      )
+      .eq("law_version_id", lawVersionId)
+      .order("hierarchy_order", { ascending: true }),
+  ]);
+
+  if (versionResponse.error) {
+    throwAuthAwareError(versionResponse.error.message);
+  }
+
+  if (sectionResponse.error) {
+    throwAuthAwareError(sectionResponse.error.message);
+  }
+
+  const lawSource = Array.isArray(versionResponse.data.policy_law_sources)
+    ? versionResponse.data.policy_law_sources[0]
+    : versionResponse.data.policy_law_sources;
+
+  return {
+    id: versionResponse.data.id,
+    source_title: lawSource?.source_title ?? null,
+    source_link: lawSource?.source_link ?? "",
+    version_label: versionResponse.data.version_label,
+    effective_date: versionResponse.data.effective_date,
+    raw_text: versionResponse.data.raw_text,
+    parse_warnings: Array.isArray(versionResponse.data.parse_warnings)
+      ? versionResponse.data.parse_warnings.filter((value): value is string => typeof value === "string")
+      : [],
+    sections: (sectionResponse.data ?? []) as LawDetail["sections"],
+  };
+}
+
 export async function registerLawSource(input: {
   sourceLink: string;
   sourceTitle?: string;
@@ -211,27 +249,11 @@ export async function registerLawSource(input: {
 }) {
   const session = await ensureAuthenticatedSession();
   const currentUser = await ensureAuthenticatedUser(session.access_token);
-  const response = await fetch(buildFunctionUrl("register-law-source"), {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      apikey: import.meta.env.VITE_SUPABASE_ANON_KEY,
-      Authorization: `Bearer ${session.access_token}`,
-    },
-    body: JSON.stringify(input),
+  return await invokeEdgeFunction("register-law-source", input, {
+    stage: "register-law-source",
+    session,
+    userId: currentUser.id,
   });
-
-  if (!response.ok) {
-    throw new Error(
-      await getHttpErrorMessage(response, {
-        stage: "register-law-source",
-        session,
-        userId: currentUser.id,
-      }),
-    );
-  }
-
-  return await response.json();
 }
 
 export async function uploadLawDocument(input: {
@@ -246,14 +268,9 @@ export async function uploadLawDocument(input: {
   const rawText = isLegacyWordDocument(input.file.name)
     ? ""
     : await extractDocumentText(input.file);
-  const response = await fetch(buildFunctionUrl("register-law-source"), {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      apikey: import.meta.env.VITE_SUPABASE_ANON_KEY,
-      Authorization: `Bearer ${session.access_token}`,
-    },
-    body: JSON.stringify({
+  return await invokeEdgeFunction(
+    "register-law-source",
+    {
       sourceType: "file",
       sourceTitle: input.sourceTitle,
       versionLabel: input.versionLabel,
@@ -262,21 +279,14 @@ export async function uploadLawDocument(input: {
       fileContentBase64,
       contentType: input.file.type || guessContentType(input.file.name),
       rawText,
-    }),
-  });
-
-  if (!response.ok) {
-    throw new Error(
-      await getHttpErrorMessage(response, {
-        stage: "upload-law-document",
-        fileName: input.file.name,
-        session,
-        userId: currentUser.id,
-      }),
-    );
-  }
-
-  return await response.json();
+    },
+    {
+      stage: "upload-law-document",
+      fileName: input.file.name,
+      session,
+      userId: currentUser.id,
+    },
+  );
 }
 
 export async function updateLawSource(input: {
@@ -288,59 +298,35 @@ export async function updateLawSource(input: {
 }) {
   const session = await ensureAuthenticatedSession();
   const currentUser = await ensureAuthenticatedUser(session.access_token);
-  const response = await fetch(buildFunctionUrl("manage-law-source"), {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      apikey: import.meta.env.VITE_SUPABASE_ANON_KEY,
-      Authorization: `Bearer ${session.access_token}`,
-    },
-    body: JSON.stringify({
+  return await invokeEdgeFunction(
+    "manage-law-source",
+    {
       action: "update",
       ...input,
-    }),
-  });
-
-  if (!response.ok) {
-    throw new Error(
-      await getHttpErrorMessage(response, {
-        stage: "update-law-source",
-        session,
-        userId: currentUser.id,
-      }),
-    );
-  }
-
-  return await response.json();
+    },
+    {
+      stage: "update-law-source",
+      session,
+      userId: currentUser.id,
+    },
+  );
 }
 
 export async function deleteLawSource(input: { lawVersionId: string }) {
   const session = await ensureAuthenticatedSession();
   const currentUser = await ensureAuthenticatedUser(session.access_token);
-  const response = await fetch(buildFunctionUrl("manage-law-source"), {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      apikey: import.meta.env.VITE_SUPABASE_ANON_KEY,
-      Authorization: `Bearer ${session.access_token}`,
-    },
-    body: JSON.stringify({
+  return await invokeEdgeFunction(
+    "manage-law-source",
+    {
       action: "delete",
       ...input,
-    }),
-  });
-
-  if (!response.ok) {
-    throw new Error(
-      await getHttpErrorMessage(response, {
-        stage: "delete-law-source",
-        session,
-        userId: currentUser.id,
-      }),
-    );
-  }
-
-  return await response.json();
+    },
+    {
+      stage: "delete-law-source",
+      session,
+      userId: currentUser.id,
+    },
+  );
 }
 
 export async function runComparison(input: {
@@ -349,27 +335,11 @@ export async function runComparison(input: {
 }) {
   const session = await ensureAuthenticatedSession();
   const currentUser = await ensureAuthenticatedUser(session.access_token);
-  const response = await fetch(buildFunctionUrl("run-comparison"), {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      apikey: import.meta.env.VITE_SUPABASE_ANON_KEY,
-      Authorization: `Bearer ${session.access_token}`,
-    },
-    body: JSON.stringify(input),
+  return await invokeEdgeFunction("run-comparison", input, {
+    stage: "run-comparison",
+    session,
+    userId: currentUser.id,
   });
-
-  if (!response.ok) {
-    throw new Error(
-      await getHttpErrorMessage(response, {
-        stage: "run-comparison",
-        session,
-        userId: currentUser.id,
-      }),
-    );
-  }
-
-  return await response.json();
 }
 
 export async function runBulkComparison(input: {
@@ -377,27 +347,11 @@ export async function runBulkComparison(input: {
 }) {
   const session = await ensureAuthenticatedSession();
   const currentUser = await ensureAuthenticatedUser(session.access_token);
-  const response = await fetch(buildFunctionUrl("run-bulk-comparison"), {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      apikey: import.meta.env.VITE_SUPABASE_ANON_KEY,
-      Authorization: `Bearer ${session.access_token}`,
-    },
-    body: JSON.stringify(input),
+  return await invokeEdgeFunction("run-bulk-comparison", input, {
+    stage: "run-bulk-comparison",
+    session,
+    userId: currentUser.id,
   });
-
-  if (!response.ok) {
-    throw new Error(
-      await getHttpErrorMessage(response, {
-        stage: "run-bulk-comparison",
-        session,
-        userId: currentUser.id,
-      }),
-    );
-  }
-
-  return await response.json();
 }
 
 export async function getComparisonReview(
@@ -522,29 +476,17 @@ export async function getAggregatedComparisonReview(
 export async function classifyRevision(comparisonRunId: string) {
   const session = await ensureAuthenticatedSession();
   const currentUser = await ensureAuthenticatedUser(session.access_token);
-  const response = await fetch(buildFunctionUrl("classify-revision"), {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      apikey: import.meta.env.VITE_SUPABASE_ANON_KEY,
-      Authorization: `Bearer ${session.access_token}`,
-    },
-    body: JSON.stringify({
+  return await invokeEdgeFunction(
+    "classify-revision",
+    {
       comparisonRunId,
-    }),
-  });
-
-  if (!response.ok) {
-    throw new Error(
-      await getHttpErrorMessage(response, {
-        stage: "classify-revision",
-        session,
-        userId: currentUser.id,
-      }),
-    );
-  }
-
-  return await response.json();
+    },
+    {
+      stage: "classify-revision",
+      session,
+      userId: currentUser.id,
+    },
+  );
 }
 
 export async function analyzeSelectedRevisions(input: {
@@ -553,27 +495,11 @@ export async function analyzeSelectedRevisions(input: {
 }): Promise<AiRevisionGuidance> {
   const session = await ensureAuthenticatedSession();
   const currentUser = await ensureAuthenticatedUser(session.access_token);
-  const response = await fetch(buildFunctionUrl("analyze-selected-revisions"), {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      apikey: import.meta.env.VITE_SUPABASE_ANON_KEY,
-      Authorization: `Bearer ${session.access_token}`,
-    },
-    body: JSON.stringify(input),
+  const payload = await invokeEdgeFunction("analyze-selected-revisions", input, {
+    stage: "analyze-selected-revisions",
+    session,
+    userId: currentUser.id,
   });
-
-  if (!response.ok) {
-    throw new Error(
-      await getHttpErrorMessage(response, {
-        stage: "analyze-selected-revisions",
-        session,
-        userId: currentUser.id,
-      }),
-    );
-  }
-
-  const payload = await response.json();
   return normalizeAiRevisionGuidance(payload.data);
 }
 
@@ -671,6 +597,33 @@ async function ensureAuthenticatedSession() {
   return refreshedSession;
 }
 
+async function forceRefreshAuthenticatedSession() {
+  const supabase = getSupabaseClient();
+  const {
+    data: { session },
+    error,
+  } = await supabase.auth.getSession();
+
+  if (error || !session?.refresh_token) {
+    throw new Error(buildAuthDebugMessage(error?.message ?? "세션 갱신 실패", session));
+  }
+
+  const {
+    data: { session: refreshedSession },
+    error: refreshError,
+  } = await supabase.auth.refreshSession({
+    refresh_token: session.refresh_token,
+  });
+
+  if (refreshError || !refreshedSession) {
+    throw new Error(
+      buildAuthDebugMessage(refreshError?.message ?? "세션 갱신 실패", session),
+    );
+  }
+
+  return refreshedSession;
+}
+
 async function ensureAuthenticatedUser(accessToken: string) {
   const supabase = getSupabaseClient();
   const {
@@ -685,6 +638,41 @@ async function ensureAuthenticatedUser(accessToken: string) {
   }
 
   return user;
+}
+
+async function invokeEdgeFunction<TBody extends Record<string, unknown>>(
+  functionName: string,
+  body: TBody,
+  contextInfo?: {
+    stage: string;
+    fileName?: string;
+    session?: {
+      user: {
+        id?: string;
+      };
+      expires_at?: number;
+    } | null;
+    userId?: string;
+  },
+) {
+  const supabase = getSupabaseClient();
+  let response = await supabase.functions.invoke(functionName, { body });
+
+  if (response.error && isJwtError(response.error.message)) {
+    const refreshedSession = await forceRefreshAuthenticatedSession();
+    response = await supabase.functions.invoke(functionName, {
+      body,
+      headers: {
+        Authorization: `Bearer ${refreshedSession.access_token}`,
+      },
+    });
+  }
+
+  if (response.error) {
+    throw new Error(formatFunctionInvokeError(response.error, contextInfo));
+  }
+
+  return response.data;
 }
 
 async function encodeFileAsBase64(file: File) {
@@ -755,8 +743,8 @@ function buildDebugPrefix(
   ].join("\n");
 }
 
-async function getHttpErrorMessage(
-  response: Response,
+function formatFunctionInvokeError(
+  error: Error,
   contextInfo?: {
     stage: string;
     fileName?: string;
@@ -769,27 +757,11 @@ async function getHttpErrorMessage(
     userId?: string;
   },
 ) {
-  const debugPrefix = buildDebugPrefix(
-    `HTTP ${response.status} ${response.statusText}`,
-    contextInfo,
-  );
-
-  try {
-    const payload = await response.json();
-    return `${debugPrefix}\n서버 응답: ${JSON.stringify(payload)}`;
-  } catch {
-    try {
-      const text = await response.text();
-      return text ? `${debugPrefix}\n서버 응답: ${text}` : debugPrefix;
-    } catch {
-      return debugPrefix;
-    }
-  }
+  return buildDebugPrefix(error.message || "함수 호출 중 오류가 발생했습니다.", contextInfo);
 }
 
-function buildFunctionUrl(functionName: string) {
-  const baseUrl = import.meta.env.VITE_SUPABASE_URL;
-  return `${baseUrl}/functions/v1/${functionName}`;
+function isJwtError(message?: string) {
+  return Boolean(message?.toLowerCase().includes("jwt"));
 }
 
 function deriveDocumentMetadata(rawText: string) {
