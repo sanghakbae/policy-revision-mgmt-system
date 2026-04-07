@@ -177,7 +177,6 @@ export default function App() {
       const message =
         error instanceof Error ? error.message : "문서 업로드 중 오류가 발생했습니다.";
       setStatus(message);
-      throw error;
     }
   }
 
@@ -206,7 +205,6 @@ export default function App() {
       const message =
         error instanceof Error ? error.message : "법령 URL 등록 중 오류가 발생했습니다.";
       setStatus(message);
-      throw error;
     }
   }
 
@@ -235,7 +233,6 @@ export default function App() {
       const message =
         error instanceof Error ? error.message : "법령 첨부파일 등록 중 오류가 발생했습니다.";
       setStatus(message);
-      throw error;
     }
   }
 
@@ -260,7 +257,6 @@ export default function App() {
       const message =
         error instanceof Error ? error.message : "법령 수정 중 오류가 발생했습니다.";
       setStatus(message);
-      throw error;
     }
   }
 
@@ -277,7 +273,6 @@ export default function App() {
       const message =
         error instanceof Error ? error.message : "법령 삭제 중 오류가 발생했습니다.";
       setStatus(message);
-      throw error;
     }
   }
 
@@ -324,7 +319,6 @@ export default function App() {
       const message =
         error instanceof Error ? error.message : "비교 실행 중 오류가 발생했습니다.";
       setStatus(message);
-      throw error;
     }
   }
 
@@ -336,11 +330,25 @@ export default function App() {
     : "권고 대기";
 
   function handleToggleLawVersion(lawVersionId: string) {
-    setSelectedLawVersionIds((current) =>
-      current.includes(lawVersionId)
-        ? current.filter((id) => id !== lawVersionId)
-        : [...current, lawVersionId],
-    );
+    const selectedLawVersion = lawVersions.find((lawVersion) => lawVersion.id === lawVersionId);
+    if (!selectedLawVersion) {
+      return;
+    }
+
+    const nextSourceType = getLawSourceType(selectedLawVersion.source_link);
+
+    setSelectedLawVersionIds((current) => {
+      if (current.includes(lawVersionId)) {
+        return current.filter((id) => id !== lawVersionId);
+      }
+
+      const sameSourceTypeSelections = current.filter((id) => {
+        const lawVersion = lawVersions.find((item) => item.id === id);
+        return lawVersion && getLawSourceType(lawVersion.source_link) === nextSourceType;
+      });
+
+      return [...sameSourceTypeSelections, lawVersionId];
+    });
   }
 
   function handleToggleDocumentSelection(documentId: string) {
@@ -469,8 +477,8 @@ export default function App() {
 
           <section className="panel">
             <div className="section-header">
-              <h2>비교 실행</h2>
-              <p>정책과 법령 비교 결과를 선택해 검토할 수 있습니다.</p>
+              <h2>비교 검토 설정</h2>
+              <p>법령 등록, 대상 선택, 비교 실행을 한 구역에서 처리합니다.</p>
             </div>
             <LawSourcePanel
               documents={documents}
@@ -506,6 +514,10 @@ export default function App() {
       </main>
     </div>
   );
+}
+
+function getLawSourceType(sourceLink: string) {
+  return sourceLink.startsWith("storage://") ? "file" : "url";
 }
 
 function toRevisionStatusLabel(

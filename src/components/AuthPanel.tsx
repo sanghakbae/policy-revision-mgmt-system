@@ -50,7 +50,7 @@ export function AuthPanel({ session }: AuthPanelProps) {
 
       {session ? (
         <div className="stack">
-          <div className="info-card">
+          <div className="info-card auth-account-card">
             <span className="muted-label">로그인 계정</span>
             <strong>{session.user.email}</strong>
           </div>
@@ -63,7 +63,7 @@ export function AuthPanel({ session }: AuthPanelProps) {
         </div>
       ) : (
         <div className="stack">
-          <div className="info-card">
+          <div className="info-card auth-method-card">
             <span className="muted-label">로그인 방식</span>
             <strong>Google OAuth</strong>
             <p className="helper-text">

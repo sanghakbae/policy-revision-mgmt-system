@@ -648,7 +648,27 @@ async function ensureAuthenticatedSession() {
     throw new Error(buildAuthDebugMessage("사용자 정보가 없습니다.", session));
   }
 
-  return session;
+  const expiresAt = session.expires_at ?? 0;
+  const shouldRefresh = expiresAt * 1000 - Date.now() <= 60_000;
+
+  if (!shouldRefresh) {
+    return session;
+  }
+
+  const {
+    data: { session: refreshedSession },
+    error: refreshError,
+  } = await supabase.auth.refreshSession({
+    refresh_token: session.refresh_token,
+  });
+
+  if (refreshError || !refreshedSession) {
+    throw new Error(
+      buildAuthDebugMessage(refreshError?.message ?? "세션 갱신 실패", session),
+    );
+  }
+
+  return refreshedSession;
 }
 
 async function ensureAuthenticatedUser(accessToken: string) {

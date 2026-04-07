@@ -31,8 +31,10 @@ export function DocumentList({
           onClick={() => onToggleSelect(document.id)}
           type="button"
         >
-          <strong>{document.title}</strong>
-          <span>구조 섹션 {document.section_count}건 저장됨</span>
+          <div className="document-list-header">
+            <strong>{document.title}</strong>
+            <span className="document-title-prefix">{`(구조 섹션 ${document.section_count}건 저장됨)`}</span>
+          </div>
           <span className="timestamp">
             업로드 일시 {new Date(document.created_at).toLocaleString("ko-KR")}
           </span>
