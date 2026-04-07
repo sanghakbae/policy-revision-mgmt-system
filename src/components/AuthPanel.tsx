@@ -17,7 +17,7 @@ export function AuthPanel({ session }: AuthPanelProps) {
   async function handleGoogleSignIn() {
     clearAuthLocationArtifacts();
     const supabase = getSupabaseClient();
-    const redirectTo = window.location.origin;
+    const redirectTo = `${window.location.origin}${window.location.pathname}`;
     const { error } = await supabase.auth.signInWithOAuth({
       provider: "google",
       options: {
