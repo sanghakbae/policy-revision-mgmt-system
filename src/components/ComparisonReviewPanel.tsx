@@ -1,6 +1,5 @@
-import { useEffect, useState } from "react";
+import { useEffect, useEffectEvent, useRef, useState } from "react";
 import {
-  analyzeSelectedRevisionsStage,
   classifyRevision,
   getAggregatedComparisonReview,
   getComparisonReview,
@@ -11,6 +10,7 @@ import type {
   AiRevisionGuidance,
   ComparisonReviewAggregate,
   ComparisonReviewDetail,
+  SavedAnalysisHistoryEntry,
 } from "../types";
 
 interface ComparisonReviewPanelProps {
@@ -19,9 +19,47 @@ interface ComparisonReviewPanelProps {
   selectedDocumentIds?: string[];
   referenceDocumentIds?: string[];
   selectedLawVersionIds?: string[];
-  analysisRequestKey?: number;
+  historyStorageKey?: string;
+  viewMode?: "results" | "history";
   setStatus: (value: string) => void;
+  onOverviewChange?: (value: ComparisonReviewOverviewSnapshot) => void;
+  analysisState: ComparisonReviewAnalysisState;
 }
+
+const STAGE_REQUEST_TIMEOUT_MS = 190_000;
+export type AnalysisStagePhase =
+  | "left"
+  | "left-wait"
+  | "right"
+  | "right-wait"
+  | "parallel"
+  | "final"
+  | "complete"
+  | null;
+
+export type ComparisonReviewAnalysisState = {
+  aiGuidance: AiRevisionGuidance | null;
+  leftGroupReport: AiGroupReport | null;
+  rightGroupReport: AiGroupReport | null;
+  comparisonReport: AiComparisonReport | null;
+  aiAnalysisError: string | null;
+  apiCallCount: number;
+  isAnalyzingSelection: boolean;
+  analysisStageLabel: string | null;
+  analysisStagePhase: AnalysisStagePhase;
+  analysisStageStartedAt: number | null;
+};
+
+export type ComparisonReviewOverviewSnapshot = {
+  selectionSummary: string;
+  selectionCounts: {
+    leftDocumentCount: number;
+    rightDocumentCount: number;
+    rightLawCount: number;
+  };
+  apiCallCount: number;
+  stageProgress: ReturnType<typeof getStageProgress>;
+};
 
 export function ComparisonReviewPanel({
   comparisonRunId,
@@ -29,36 +67,109 @@ export function ComparisonReviewPanel({
   selectedDocumentIds = [],
   referenceDocumentIds = [],
   selectedLawVersionIds = [],
-  analysisRequestKey = 0,
+  historyStorageKey,
+  viewMode = "results",
   setStatus,
+  onOverviewChange,
+  analysisState,
 }: ComparisonReviewPanelProps) {
+  const emitStatus = useEffectEvent((message: string) => {
+    setStatus(message);
+  });
   const [detail, setDetail] = useState<ComparisonReviewDetail | null>(null);
   const [aggregate, setAggregate] = useState<ComparisonReviewAggregate | null>(null);
-  const [aiGuidance, setAiGuidance] = useState<AiRevisionGuidance | null>(null);
-  const [leftGroupReport, setLeftGroupReport] = useState<AiGroupReport | null>(null);
-  const [rightGroupReport, setRightGroupReport] = useState<AiGroupReport | null>(null);
-  const [comparisonReport, setComparisonReport] = useState<AiComparisonReport | null>(null);
-  const [aiAnalysisError, setAiAnalysisError] = useState<string | null>(null);
-  const [apiCallCount, setApiCallCount] = useState(0);
-  const [isAnalyzingSelection, setIsAnalyzingSelection] = useState(false);
-  const [analysisStageLabel, setAnalysisStageLabel] = useState<string | null>(null);
+  const [progressNow, setProgressNow] = useState(() => Date.now());
   const [isLoading, setIsLoading] = useState(false);
   const [isClassifying, setIsClassifying] = useState(false);
+  const [savedHistory, setSavedHistory] = useState<SavedAnalysisHistoryEntry[]>([]);
+  const [loadedHistoryEntry, setLoadedHistoryEntry] = useState<SavedAnalysisHistoryEntry | null>(null);
+  const lastAutoSavedSignatureRef = useRef<string | null>(null);
   const selectionSummary = getSelectionSummary(
     selectedDocumentIds.length,
     referenceDocumentIds.length,
     selectedLawVersionIds.length,
   );
+  const selectionCounts = {
+    leftDocumentCount: selectedDocumentIds.length,
+    rightDocumentCount: referenceDocumentIds.length,
+    rightLawCount: selectedLawVersionIds.length,
+  };
   const stageProgress = getStageProgress({
-    leftGroupReport,
-    rightGroupReport,
-    comparisonReport,
-    isAnalyzingSelection,
-    analysisStageLabel,
+    leftGroupReport: analysisState.leftGroupReport,
+    rightGroupReport: analysisState.rightGroupReport,
+    comparisonReport: analysisState.comparisonReport,
+    isAnalyzingSelection: analysisState.isAnalyzingSelection,
+    analysisStageLabel: analysisState.analysisStageLabel,
+    analysisStagePhase: analysisState.analysisStagePhase,
+    analysisStageStartedAt: analysisState.analysisStageStartedAt,
+    now: progressNow,
   });
 
   useEffect(() => {
+    if (!analysisState.isAnalyzingSelection || !analysisState.analysisStageStartedAt) {
+      return;
+    }
+
+    const timer = window.setInterval(() => {
+      setProgressNow(Date.now());
+    }, 1000);
+
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [analysisState.analysisStageStartedAt, analysisState.isAnalyzingSelection]);
+
+  useEffect(() => {
+    setSavedHistory(readSavedAnalysisHistory(historyStorageKey));
+  }, [historyStorageKey]);
+
+  useEffect(() => {
+    onOverviewChange?.({
+      selectionSummary,
+      selectionCounts,
+      apiCallCount: analysisState.apiCallCount,
+      stageProgress,
+    });
+  }, [analysisState.apiCallCount, onOverviewChange, selectionCounts, selectionSummary, stageProgress]);
+
+  useEffect(() => {
+    if (!analysisState.aiGuidance) {
+      return;
+    }
+
+    const signature = buildSavedHistorySignature({
+      selectionCounts,
+      guidance: analysisState.aiGuidance,
+    });
+    if (lastAutoSavedSignatureRef.current === signature) {
+      return;
+    }
+
+    const exists = savedHistory.some((entry) =>
+      buildSavedHistorySignature({
+        selectionCounts: entry.selectionCounts,
+        guidance: entry.guidance,
+      }) === signature,
+    );
+    if (exists) {
+      lastAutoSavedSignatureRef.current = signature;
+      return;
+    }
+
+    const next = [createSavedHistoryEntry({
+      selectionSummary,
+      selectionCounts,
+      guidance: analysisState.aiGuidance,
+    }), ...savedHistory].slice(0, 20);
+    setSavedHistory(next);
+    writeSavedAnalysisHistory(historyStorageKey, next);
+    lastAutoSavedSignatureRef.current = signature;
+    emitStatus("현재 AI 비교 리포트를 이력에 자동 저장했습니다.");
+  }, [analysisState.aiGuidance, emitStatus, historyStorageKey, savedHistory, selectionCounts, selectionSummary]);
+
+  useEffect(() => {
     if (comparisonRunIds.length > 1) {
+      setLoadedHistoryEntry(null);
       setIsLoading(true);
       getAggregatedComparisonReview(comparisonRunIds)
         .then((data) => {
@@ -66,7 +177,7 @@ export function ComparisonReviewPanel({
           setDetail(null);
         })
         .catch((error: Error) => {
-          setStatus(error.message);
+          emitStatus(error.message);
           setAggregate(null);
           setDetail(null);
         })
@@ -82,6 +193,7 @@ export function ComparisonReviewPanel({
       return;
     }
 
+    setLoadedHistoryEntry(null);
     setIsLoading(true);
     getComparisonReview(comparisonRunId)
       .then((data) => {
@@ -89,115 +201,14 @@ export function ComparisonReviewPanel({
         setAggregate(null);
       })
       .catch((error: Error) => {
-        setStatus(error.message);
+        emitStatus(error.message);
         setDetail(null);
         setAggregate(null);
       })
       .finally(() => {
         setIsLoading(false);
       });
-  }, [comparisonRunId, comparisonRunIds, setStatus]);
-
-  useEffect(() => {
-    if (
-      selectedDocumentIds.length === 0 ||
-      (referenceDocumentIds.length === 0 && selectedLawVersionIds.length === 0)
-    ) {
-      setAiGuidance(null);
-      setLeftGroupReport(null);
-      setRightGroupReport(null);
-      setComparisonReport(null);
-      setAiAnalysisError(null);
-      setAnalysisStageLabel(null);
-      return;
-    }
-
-    if (analysisRequestKey === 0) {
-      return;
-    }
-
-    setIsAnalyzingSelection(true);
-    setAiAnalysisError(null);
-    setLeftGroupReport(null);
-    setRightGroupReport(null);
-    setComparisonReport(null);
-    setAiGuidance(null);
-    setAnalysisStageLabel("왼쪽 그룹 정리 중");
-    let cancelled = false;
-
-    (async () => {
-      const leftStage = await analyzeSelectedRevisionsStage({
-        stage: "left",
-        targetDocumentIds: selectedDocumentIds,
-        referenceDocumentIds,
-        lawVersionIds: selectedLawVersionIds,
-      });
-      if (cancelled) {
-        return;
-      }
-      setLeftGroupReport(leftStage.left_group_report);
-      setApiCallCount((current) => Math.max(current, leftStage.api_call_count));
-
-      setAnalysisStageLabel("오른쪽 그룹 정리 중");
-      const rightStage = await analyzeSelectedRevisionsStage({
-        stage: "right",
-        targetDocumentIds: selectedDocumentIds,
-        referenceDocumentIds,
-        lawVersionIds: selectedLawVersionIds,
-      });
-      if (cancelled) {
-        return;
-      }
-      setRightGroupReport(rightStage.right_group_report);
-      setApiCallCount((current) => Math.max(current, rightStage.api_call_count));
-
-      setAnalysisStageLabel("최종 비교 리포트 생성 중");
-      const finalStage = await analyzeSelectedRevisionsStage({
-        stage: "final",
-        targetDocumentIds: selectedDocumentIds,
-        referenceDocumentIds,
-        lawVersionIds: selectedLawVersionIds,
-        leftGroupReport: leftStage.left_group_report,
-        rightGroupReport: rightStage.right_group_report,
-      });
-      if (cancelled) {
-        return;
-      }
-      setComparisonReport(finalStage.comparison_report);
-      setApiCallCount((current) => Math.max(current, finalStage.api_call_count));
-      setAiGuidance({
-        left_group_report: leftStage.left_group_report as AiGroupReport,
-        right_group_report: rightStage.right_group_report as AiGroupReport,
-        comparison_report: finalStage.comparison_report as AiComparisonReport,
-        model: finalStage.model,
-        api_call_count: finalStage.api_call_count,
-      });
-      setAiAnalysisError(null);
-      setAnalysisStageLabel("3단계 리포트 생성 완료");
-    })()
-      .catch((error: Error) => {
-        if (cancelled) {
-          return;
-        }
-        setStatus(error.message);
-        setAiGuidance(null);
-        setLeftGroupReport(null);
-        setRightGroupReport(null);
-        setComparisonReport(null);
-        setAiAnalysisError(error.message);
-        setAnalysisStageLabel(null);
-      })
-      .finally(() => {
-        if (cancelled) {
-          return;
-        }
-        setIsAnalyzingSelection(false);
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [analysisRequestKey, selectedDocumentIds, referenceDocumentIds, selectedLawVersionIds, setStatus]);
+  }, [comparisonRunId, comparisonRunIds]);
 
   async function handleClassify() {
     if (!comparisonRunId) {
@@ -221,41 +232,159 @@ export function ComparisonReviewPanel({
     }
   }
 
+  function handleSaveCurrentReport() {
+    if (!analysisState.aiGuidance) {
+      return;
+    }
+
+    const entry = createSavedHistoryEntry({
+      selectionSummary,
+      selectionCounts,
+      guidance: analysisState.aiGuidance,
+    });
+    const next = [entry, ...savedHistory].slice(0, 20);
+    setSavedHistory(next);
+    writeSavedAnalysisHistory(historyStorageKey, next);
+    lastAutoSavedSignatureRef.current = buildSavedHistorySignature({
+      selectionCounts,
+      guidance: analysisState.aiGuidance,
+    });
+    emitStatus("현재 AI 비교 리포트를 이력에 저장했습니다.");
+  }
+
+  function handleLoadSavedReport(entryId: string) {
+    const entry = savedHistory.find((item) => item.id === entryId);
+    if (!entry) {
+      return;
+    }
+
+    setLoadedHistoryEntry(entry);
+    setDetail(null);
+    setAggregate(null);
+    setIsLoading(false);
+    emitStatus(`저장된 AI 리포트 이력을 불러왔습니다. (${formatSavedHistoryTimestamp(entry.createdAt)})`);
+  }
+
+  function handleDeleteSavedReport(entryId: string) {
+    const next = savedHistory.filter((item) => item.id !== entryId);
+    setSavedHistory(next);
+    writeSavedAnalysisHistory(historyStorageKey, next);
+    emitStatus("선택한 AI 리포트 이력을 삭제했습니다.");
+  }
+
   const hasSelectionContext =
     selectedDocumentIds.length > 0 &&
     (referenceDocumentIds.length > 0 || selectedLawVersionIds.length > 0);
+  const overviewSelectionSummary = loadedHistoryEntry?.selectionSummary ?? selectionSummary;
+  const overviewSelectionCounts = loadedHistoryEntry?.selectionCounts ?? selectionCounts;
+  const shouldShowHistory = viewMode === "history";
+  const shouldShowResults = viewMode === "results" || loadedHistoryEntry !== null;
+  const displayedGuidance = loadedHistoryEntry?.guidance ?? analysisState.aiGuidance;
+  const displayedLeftGroupReport = loadedHistoryEntry?.guidance.left_group_report ?? analysisState.leftGroupReport;
+  const displayedRightGroupReport = loadedHistoryEntry?.guidance.right_group_report ?? analysisState.rightGroupReport;
+  const displayedComparisonReport =
+    loadedHistoryEntry?.guidance.comparison_report ?? analysisState.comparisonReport;
+  const displayedApiCallCount = loadedHistoryEntry?.guidance.api_call_count ?? analysisState.apiCallCount;
+  const displayedAnalysisStageLabel =
+    loadedHistoryEntry ? "저장된 이력을 불러왔습니다." : analysisState.analysisStageLabel;
+  const displayedAiAnalysisError = loadedHistoryEntry ? null : analysisState.aiAnalysisError;
+  const displayedIsAnalyzingSelection = loadedHistoryEntry ? false : analysisState.isAnalyzingSelection;
 
-  if (!comparisonRunId && comparisonRunIds.length === 0 && !hasSelectionContext) {
+  if (loadedHistoryEntry) {
     return (
-      <div className="empty-state">
-        <strong>비교 검토</strong>
-        <p>아직 비교 대상이 준비되지 않았습니다. 좌측과 우측 그룹을 먼저 구성하세요.</p>
+      <div className="stack comparison-review-shell">
+        <div className="section-header comparison-review-header">
+          <div>
+            <h2>비교 검토</h2>
+            <p>저장된 AI 리포트 이력을 불러온 화면입니다.</p>
+          </div>
+          <button
+            type="button"
+            className="button ghost"
+            onClick={() => {
+              setLoadedHistoryEntry(null);
+            }}
+          >
+            이력 닫기
+          </button>
+        </div>
+        {shouldShowHistory ? (
+          <SavedAnalysisHistorySection
+            entries={savedHistory}
+            onLoad={handleLoadSavedReport}
+            onDelete={handleDeleteSavedReport}
+          />
+        ) : null}
+        <div className="info-card comparison-history-loaded-card">
+          <span className="muted-label">저장된 리포트</span>
+          <strong>{loadedHistoryEntry.title}</strong>
+          <p className="helper-text detailed-empty-reason">
+            저장 시각 {formatSavedHistoryTimestamp(loadedHistoryEntry.createdAt)}
+          </p>
+        </div>
+        <AiGuidancePanel
+          guidance={displayedGuidance}
+          leftGroupReport={displayedLeftGroupReport}
+          rightGroupReport={displayedRightGroupReport}
+          comparisonReport={displayedComparisonReport}
+          error={displayedAiAnalysisError}
+          isLoading={displayedIsAnalyzingSelection}
+          analysisStageLabel={displayedAnalysisStageLabel}
+          apiCallCount={displayedApiCallCount}
+          className="ai-guidance-offset"
+          onSaveCurrentReport={handleSaveCurrentReport}
+        />
       </div>
     );
   }
 
-  if (!comparisonRunId && comparisonRunIds.length === 0 && hasSelectionContext) {
+  if (shouldShowHistory && !comparisonRunId && comparisonRunIds.length === 0 && !hasSelectionContext) {
+    return (
+      <div className="empty-state">
+        <strong>{shouldShowHistory ? "이력 관리" : "검토 결과"}</strong>
+        <p>
+          {shouldShowHistory
+            ? "저장된 검토 이력이 없거나 아직 비교 대상이 준비되지 않았습니다."
+            : "아직 비교 대상이 준비되지 않았습니다. 비교 대상과 기준을 먼저 구성하세요."}
+        </p>
+      </div>
+    );
+  }
+
+  if (!shouldShowHistory && !comparisonRunId && comparisonRunIds.length === 0 && !hasSelectionContext) {
     return (
       <div className="stack comparison-review-shell">
         <div className="section-header comparison-review-header">
-          <h2>비교 검토</h2>
-          <p>좌측 정책·지침과 우측 그룹 전체를 기준으로 종합 개정 검토 리포트를 표시합니다.</p>
+          <h2>검토 결과</h2>
+          <p>비교를 실행하면 1단계, 2단계, 3단계 결과가 아래 프레임에 순서대로 표시됩니다.</p>
         </div>
-        <ComparisonReviewOverview
-          selectionSummary={selectionSummary}
-          apiCallCount={apiCallCount}
-          stageProgress={stageProgress}
-        />
         <AiGuidancePanel
-          guidance={aiGuidance}
-          leftGroupReport={leftGroupReport}
-          rightGroupReport={rightGroupReport}
-          comparisonReport={comparisonReport}
-          error={aiAnalysisError}
-          isLoading={isAnalyzingSelection}
-          analysisStageLabel={analysisStageLabel}
-          apiCallCount={apiCallCount}
+          guidance={displayedGuidance}
+          leftGroupReport={displayedLeftGroupReport}
+          rightGroupReport={displayedRightGroupReport}
+          comparisonReport={displayedComparisonReport}
+          error={displayedAiAnalysisError}
+          isLoading={displayedIsAnalyzingSelection}
+          analysisStageLabel={displayedAnalysisStageLabel}
+          apiCallCount={displayedApiCallCount}
           className="ai-guidance-offset"
+          onSaveCurrentReport={handleSaveCurrentReport}
+        />
+      </div>
+    );
+  }
+
+  if (shouldShowHistory && loadedHistoryEntry === null) {
+    return (
+      <div className="stack comparison-review-shell">
+        <div className="section-header comparison-review-header">
+          <h2>이력 관리</h2>
+          <p>저장된 검토 결과 이력을 확인하고 필요하면 다시 불러오세요.</p>
+        </div>
+        <SavedAnalysisHistorySection
+          entries={savedHistory}
+          onLoad={handleLoadSavedReport}
+          onDelete={handleDeleteSavedReport}
         />
       </div>
     );
@@ -273,22 +402,22 @@ export function ComparisonReviewPanel({
     return (
       <div className="stack comparison-review-shell">
         <div className="section-header comparison-review-header">
-          <h2>비교 검토</h2>
+          <h2>{shouldShowHistory ? "이력 관리" : "검토 결과"}</h2>
           <p>선택된 정책·지침과 지정된 법령을 한 묶음으로 분석한 종합 결과입니다.</p>
         </div>
-        <ComparisonReviewOverview
-          selectionSummary={selectionSummary}
-          apiCallCount={apiCallCount}
-          stageProgress={stageProgress}
-        />
-
+        {shouldShowHistory ? (
+          <SavedAnalysisHistorySection
+            entries={savedHistory}
+            onLoad={handleLoadSavedReport}
+            onDelete={handleDeleteSavedReport}
+          />
+        ) : null}
         {isLoading ? (
           <div className="info-card">
             <span className="muted-label">로딩 상태</span>
             <strong>선택된 비교 결과를 다시 불러오는 중입니다.</strong>
           </div>
         ) : null}
-
         <div className="comparison-summary-strip">
           <div className="info-card comparison-summary-box comparison-summary-box-policy">
             <span className="muted-label">선택 정책 및 지침</span>
@@ -301,7 +430,7 @@ export function ComparisonReviewPanel({
           </div>
           <div className="info-card comparison-summary-box comparison-summary-box-api">
             <span className="muted-label">OpenAI API 호출</span>
-            <strong>{apiCallCount}건</strong>
+            <strong>{displayedApiCallCount}건</strong>
           </div>
         </div>
 
@@ -326,25 +455,47 @@ export function ComparisonReviewPanel({
           </div>
         ) : null}
 
-        <AiGuidancePanel
-          guidance={aiGuidance}
-          leftGroupReport={leftGroupReport}
-          rightGroupReport={rightGroupReport}
-          comparisonReport={comparisonReport}
-          error={aiAnalysisError}
-          isLoading={isAnalyzingSelection}
-          analysisStageLabel={analysisStageLabel}
-          apiCallCount={apiCallCount}
-          className="ai-guidance-offset"
-        />
+        {shouldShowResults ? (
+          <AiGuidancePanel
+            guidance={displayedGuidance}
+            leftGroupReport={displayedLeftGroupReport}
+            rightGroupReport={displayedRightGroupReport}
+            comparisonReport={displayedComparisonReport}
+            error={displayedAiAnalysisError}
+            isLoading={displayedIsAnalyzingSelection}
+            analysisStageLabel={displayedAnalysisStageLabel}
+            apiCallCount={displayedApiCallCount}
+            className="ai-guidance-offset"
+            onSaveCurrentReport={handleSaveCurrentReport}
+          />
+        ) : null}
       </div>
     );
   }
 
   if (!detail) {
+    if (shouldShowHistory) {
+      return (
+        <div className="empty-state">
+          <strong>비교 검토 데이터를 찾지 못했습니다.</strong>
+        </div>
+      );
+    }
+
     return (
-      <div className="empty-state">
-        <strong>비교 검토 데이터를 찾지 못했습니다.</strong>
+      <div className="stack comparison-review-shell">
+        <AiGuidancePanel
+          guidance={displayedGuidance}
+          leftGroupReport={displayedLeftGroupReport}
+          rightGroupReport={displayedRightGroupReport}
+          comparisonReport={displayedComparisonReport}
+          error={displayedAiAnalysisError}
+          isLoading={displayedIsAnalyzingSelection}
+          analysisStageLabel={displayedAnalysisStageLabel}
+          apiCallCount={displayedApiCallCount}
+          className="ai-guidance-offset"
+          onSaveCurrentReport={handleSaveCurrentReport}
+        />
       </div>
     );
   }
@@ -354,24 +505,24 @@ export function ComparisonReviewPanel({
   return (
     <div className="stack comparison-review-shell">
       <div className="section-header comparison-review-header">
-        <h2>비교 검토</h2>
+        <h2>{shouldShowHistory ? "이력 관리" : "검토 결과"}</h2>
         <p>
           법령 변경에 따라 현행 정책을 개정해야 하는지 검토하기 위한 결과만 표시합니다.
         </p>
       </div>
-      <ComparisonReviewOverview
-        selectionSummary={selectionSummary}
-        apiCallCount={apiCallCount}
-        stageProgress={stageProgress}
-      />
-
+      {shouldShowHistory ? (
+        <SavedAnalysisHistorySection
+          entries={savedHistory}
+          onLoad={handleLoadSavedReport}
+          onDelete={handleDeleteSavedReport}
+        />
+      ) : null}
       {isLoading ? (
         <div className="info-card">
           <span className="muted-label">로딩 상태</span>
           <strong>선택된 비교 결과를 다시 불러오는 중입니다.</strong>
         </div>
       ) : null}
-
       <div className="meta-grid comparison-meta-grid">
         <div className="info-card">
           <span className="muted-label">정책 문서</span>
@@ -456,17 +607,20 @@ export function ComparisonReviewPanel({
         </div>
       ) : null}
 
-      <AiGuidancePanel
-        guidance={aiGuidance}
-        leftGroupReport={leftGroupReport}
-        rightGroupReport={rightGroupReport}
-        comparisonReport={comparisonReport}
-        error={aiAnalysisError}
-        isLoading={isAnalyzingSelection}
-        analysisStageLabel={analysisStageLabel}
-        apiCallCount={apiCallCount}
-        className="ai-guidance-offset"
-      />
+      {shouldShowResults ? (
+        <AiGuidancePanel
+          guidance={displayedGuidance}
+          leftGroupReport={displayedLeftGroupReport}
+          rightGroupReport={displayedRightGroupReport}
+          comparisonReport={displayedComparisonReport}
+          error={displayedAiAnalysisError}
+          isLoading={displayedIsAnalyzingSelection}
+          analysisStageLabel={displayedAnalysisStageLabel}
+          apiCallCount={displayedApiCallCount}
+          className="ai-guidance-offset"
+          onSaveCurrentReport={handleSaveCurrentReport}
+        />
+      ) : null}
     </div>
   );
 }
@@ -481,191 +635,131 @@ function AiGuidancePanel(input: {
   analysisStageLabel: string | null;
   apiCallCount: number;
   className?: string;
+  onSaveCurrentReport: () => void;
 }) {
   return (
     <section className={`review-column comparison-ai-shell ${input.className ?? ""}`.trim()}>
-      <div className="section-header comparison-ai-header">
-        <h3>AI 비교 결과</h3>
-        <p>기준 법률 대비 비교 대상 정책·지침의 누락 및 개정 필요 항목과 반영 가이드를 표시합니다.</p>
+      <div className="comparison-result-columns">
+        <GroupReportSection
+          stepLabel="1단계"
+          frameClassName="comparison-review-stage-frame-step-1"
+          title="검토 비교 대상 정리"
+          description="검토 비교 대상 문서를 통합 정리합니다."
+          summary={input.leftGroupReport?.summary ?? "검토 비교 대상 리포트를 생성하면 여기에 결과가 표시됩니다."}
+          keyFindings={input.leftGroupReport?.key_findings ?? []}
+          documents={(input.leftGroupReport?.documents ?? []).map((item) => ({
+            id: `left-document-${item.document_id}`,
+            title: item.document_title,
+            evidencePairs: normalizeDocumentEvidencePairs(item),
+          }))}
+          requirements={(input.leftGroupReport?.merged_requirements ?? []).map((item, index) => ({
+            id: `left-requirement-${index}-${item.topic}`,
+            topic: item.topic,
+            detail: item.detail,
+            evidencePairs: normalizeRequirementEvidencePairs(item),
+            notes: item.notes,
+          }))}
+        />
+        <GroupReportSection
+          stepLabel="2단계"
+          frameClassName="comparison-review-stage-frame-step-2"
+          title="기준 정리"
+          description="기준 문서·법률 묶음을 기준 요구사항으로 정리합니다."
+          summary={input.rightGroupReport?.summary ?? "기준 리포트를 생성하면 여기에 결과가 표시됩니다."}
+          keyFindings={input.rightGroupReport?.key_findings ?? []}
+          documents={(input.rightGroupReport?.documents ?? []).map((item) => ({
+            id: `right-document-${item.document_id}`,
+            title: item.document_title,
+            evidencePairs: normalizeDocumentEvidencePairs(item),
+          }))}
+          requirements={(input.rightGroupReport?.merged_requirements ?? []).map((item, index) => ({
+            id: `right-requirement-${index}-${item.topic}`,
+            topic: item.topic,
+            detail: item.detail,
+            evidencePairs: normalizeRequirementEvidencePairs(item),
+            notes: item.notes,
+          }))}
+        />
+        <ComparisonReportSection
+          stepLabel="3단계"
+          frameClassName="comparison-review-stage-frame-step-3"
+          title="최종 비교 리포트"
+          description="좌우 정리본을 비교해 개정 포인트를 도출합니다."
+          guidance={input.comparisonReport}
+          apiCallCount={input.apiCallCount}
+          model={input.guidance?.model ?? "미기록"}
+          analysisStageLabel={input.error ?? input.analysisStageLabel}
+        />
       </div>
-
-      {input.isLoading ? (
-        <div className="info-card detail-card">
-          <strong>AI가 좌우 그룹을 비교하는 중입니다.</strong>
-          <p className="helper-text detailed-empty-reason">
-            {input.analysisStageLabel
-              ? `${input.analysisStageLabel} 단계 결과를 먼저 받고 있습니다.`
-              : "선택된 정책·지침과 기준 그룹을 함께 읽고 누락, 충돌, 반영 위치를 정리하고 있습니다."}
-          </p>
-        </div>
-      ) : null}
-
-      {!input.isLoading && input.error ? (
-        <div className="warning-card detail-card">
-          <strong>AI 비교 결과를 생성하지 못했습니다.</strong>
-          <p className="helper-text detailed-empty-reason">{input.error}</p>
-          <p className="helper-text detailed-empty-reason">
-            권장 조치: 선택된 문서와 법령에 구조 섹션이 있는지, OpenAI 시크릿과 Edge Function이 준비되어 있는지 확인하세요.
-          </p>
-        </div>
-      ) : null}
-
-      {!input.isLoading && !input.guidance && !input.error ? (
-        <div className="info-card detail-card">
-          <strong>좌측과 우측 그룹을 고르면 AI 비교 결과가 여기에 표시됩니다.</strong>
-          <p className="helper-text detailed-empty-reason">
-            결과에는 누락 항목, 현재 정책이 이미 커버하는 내용, 남은 관찰 포인트, 문서별 반영 가이드가 포함됩니다.
-          </p>
-        </div>
-      ) : null}
-
-      {input.leftGroupReport || input.rightGroupReport || input.comparisonReport ? (
-        <div className="stack">
-          <div className="comparison-report-stage-strip comparison-report-stage-strip-detailed">
-            <article className="comparison-report-stage comparison-report-stage-left">
-              <span className="comparison-report-stage-step">1단계</span>
-              <strong>왼쪽 그룹 정리</strong>
-              <p>정책·지침 묶음을 통합 정리합니다.</p>
-            </article>
-            <article className="comparison-report-stage comparison-report-stage-right">
-              <span className="comparison-report-stage-step">2단계</span>
-              <strong>오른쪽 그룹 정리</strong>
-              <p>기준 문서·법률 묶음을 기준 요구사항으로 정리합니다.</p>
-            </article>
-            <article className="comparison-report-stage comparison-report-stage-final">
-              <span className="comparison-report-stage-step">3단계</span>
-              <strong>최종 비교 리포트</strong>
-              <p>좌우 정리본을 비교해 개정 포인트를 도출합니다.</p>
-            </article>
-          </div>
-          <div className="recommendation-card ai-summary-card comparison-report-summary-card">
-            <p className="recommendation-copy">
-              {input.comparisonReport?.summary ??
-                input.rightGroupReport?.summary ??
-                input.leftGroupReport?.summary ??
-                "단계별 리포트를 생성하는 중입니다."}
-            </p>
-            <div className="pill-row">
-              <span
-                className={`pill ${
-                  input.comparisonReport?.revision_needed ? "warning" : "success"
-                }`}
-              >
-                {input.comparisonReport?.revision_needed
-                  ? "개정 검토 필요"
-                  : input.comparisonReport
-                    ? "즉시 개정 필요성 낮음"
-                    : "단계 실행 중"}
-              </span>
-              <span className="pill neutral">OpenAI 호출 {input.apiCallCount}건</span>
-            </div>
-            <p className="recommendation-copy">
-              {input.comparisonReport?.overall_comment ??
-                input.analysisStageLabel ??
-                "좌우 그룹 정리와 최종 비교를 차례로 수행합니다."}
-            </p>
-            <p className="helper-text">
-              모델: {input.guidance?.model ?? "미기록"}
-            </p>
-          </div>
-          <GroupReportSection
-            title="왼쪽 그룹 정리"
-            summary={input.leftGroupReport?.summary ?? "왼쪽 그룹 리포트를 생성하는 중입니다."}
-            keyFindings={input.leftGroupReport?.key_findings ?? []}
-            documents={(input.leftGroupReport?.documents ?? []).map((item) => ({
-              id: `left-document-${item.document_id}`,
-              title: item.document_title,
-              keyPoints: item.key_points,
-              sourcePaths: item.source_paths,
-            }))}
-            requirements={(input.leftGroupReport?.merged_requirements ?? []).map((item, index) => ({
-              id: `left-requirement-${index}-${item.topic}`,
-              topic: item.topic,
-              detail: item.detail,
-              sourceTitles: item.source_titles,
-              sourcePaths: item.source_paths,
-              notes: item.notes,
-            }))}
-          />
-          <GroupReportSection
-            title="오른쪽 그룹 정리"
-            summary={input.rightGroupReport?.summary ?? "오른쪽 그룹 리포트를 생성하는 중입니다."}
-            keyFindings={input.rightGroupReport?.key_findings ?? []}
-            documents={(input.rightGroupReport?.documents ?? []).map((item) => ({
-              id: `right-document-${item.document_id}`,
-              title: item.document_title,
-              keyPoints: item.key_points,
-              sourcePaths: item.source_paths,
-            }))}
-            requirements={(input.rightGroupReport?.merged_requirements ?? []).map((item, index) => ({
-              id: `right-requirement-${index}-${item.topic}`,
-              topic: item.topic,
-              detail: item.detail,
-              sourceTitles: item.source_titles,
-              sourcePaths: item.source_paths,
-              notes: item.notes,
-            }))}
-          />
-          <ComparisonReportSection guidance={input.comparisonReport} />
-        </div>
-      ) : null}
     </section>
   );
 }
 
-function ComparisonReviewOverview(input: {
-  selectionSummary: string;
-  apiCallCount: number;
-  stageProgress: ReturnType<typeof getStageProgress>;
+function SavedAnalysisHistorySection(input: {
+  entries: SavedAnalysisHistoryEntry[];
+  onLoad: (entryId: string) => void;
+  onDelete: (entryId: string) => void;
 }) {
+  const [page, setPage] = useState(1);
+  const pageSize = 5;
+  const totalPages = Math.max(1, Math.ceil(input.entries.length / pageSize));
+  const currentPage = Math.min(page, totalPages);
+  const pageEntries = input.entries.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+
+  useEffect(() => {
+    setPage((current) => Math.min(current, Math.max(1, Math.ceil(input.entries.length / pageSize))));
+  }, [input.entries.length]);
+
   return (
-    <section className="comparison-review-overview">
-      <article className="comparison-overview-card comparison-overview-card-summary">
-        <span className="muted-label">현재 분석 범위</span>
-        <strong>좌우 그룹 선택 상태</strong>
-        <p className="helper-text detailed-empty-reason">{input.selectionSummary}</p>
-      </article>
-      <article className="comparison-overview-card comparison-overview-card-progress">
-        <span className="muted-label">AI 단계 진행</span>
-        <strong>전체 진행률</strong>
-        <div className="comparison-progress-section">
-          <div className="comparison-stage-progress-head">
-            <span>{input.stageProgress.label}</span>
-            <strong>{input.stageProgress.percent}%</strong>
-          </div>
-          <p className="helper-text detailed-empty-reason">{input.stageProgress.detail}</p>
-          <div className="comparison-progress-track" aria-hidden="true">
-            <div
-              className="comparison-progress-fill"
-              style={{ width: `${input.stageProgress.percent}%` }}
-            />
-          </div>
+    <section className="review-column comparison-history-shell">
+      <div className="section-header">
+        <h3>AI 리포트 이력</h3>
+        <p>저장한 비교 리포트를 다시 열어 현재 패널에서 확인할 수 있습니다.</p>
+      </div>
+      {input.entries.length === 0 ? (
+        <div className="info-card">
+          <strong>저장된 AI 리포트 이력이 없습니다.</strong>
+          <p className="helper-text detailed-empty-reason">AI 비교 결과가 생성되면 `결과 저장`으로 보관할 수 있습니다.</p>
         </div>
-        <div className="comparison-stage-progress-list">
-          {input.stageProgress.steps.map((step) => (
-            <div
-              key={step.id}
-              className={`comparison-stage-progress-item comparison-stage-progress-item-${step.status}`}
-            >
-              <div className="comparison-stage-progress-head">
-                <span>{step.label}</span>
-                <strong>{step.percent}% · {step.statusLabel}</strong>
+      ) : (
+        <div className="stack">
+          {pageEntries.map((entry) => (
+            <article key={entry.id} className="info-card comparison-history-card">
+              <span className="muted-label">{formatSavedHistoryTimestamp(entry.createdAt)}</span>
+              <strong>{entry.title}</strong>
+              <p className="helper-text detailed-empty-reason">{entry.selectionSummary}</p>
+              <div className="pill-row">
+                <span className="pill neutral">좌측 {entry.selectionCounts.leftDocumentCount}건</span>
+                <span className="pill neutral">우측 문서 {entry.selectionCounts.rightDocumentCount}건</span>
+                <span className="pill neutral">법령 {entry.selectionCounts.rightLawCount}건</span>
+                <span className="pill neutral">OpenAI {entry.guidance.api_call_count}건</span>
               </div>
-              <div className="comparison-stage-progress-track" aria-hidden="true">
-                <div
-                  className="comparison-stage-progress-fill"
-                  style={{ width: `${step.percent}%` }}
-                />
+              <div className="button-row">
+                <button type="button" className="button ghost" onClick={() => input.onLoad(entry.id)}>
+                  이력 열기
+                </button>
+                <button type="button" className="button ghost" onClick={() => input.onDelete(entry.id)}>
+                  이력 삭제
+                </button>
               </div>
-            </div>
+            </article>
           ))}
+          {totalPages > 1 ? (
+            <div className="comparison-history-pagination">
+              {Array.from({ length: totalPages }, (_, index) => index + 1).map((pageNumber) => (
+                <button
+                  key={pageNumber}
+                  type="button"
+                  className={`button ghost comparison-history-page-button ${pageNumber === currentPage ? "is-active" : ""}`}
+                  onClick={() => setPage(pageNumber)}
+                >
+                  {pageNumber}
+                </button>
+              ))}
+            </div>
+          ) : null}
         </div>
-      </article>
-      <article className="comparison-overview-card comparison-overview-card-usage">
-        <span className="muted-label">OpenAI 호출</span>
-        <strong>{input.apiCallCount}건</strong>
-        <p className="helper-text detailed-empty-reason">동시에 처리하지 않고 한 단계씩 순차 실행합니다.</p>
-      </article>
+      )}
     </section>
   );
 }
@@ -685,124 +779,106 @@ type GuidanceItem = {
 type GroupDocumentItem = {
   id: string;
   title: string;
-  keyPoints: string[];
-  sourcePaths: string[];
+  evidencePairs: Array<{
+    keyPoint: string;
+    sourcePath: string;
+  }>;
 };
 
 type GroupRequirementItem = {
   id: string;
   topic: string;
   detail: string;
-  sourceTitles: string[];
-  sourcePaths: string[];
+  evidencePairs: Array<{
+    sourceTitle: string;
+    sourcePath: string;
+  }>;
   notes: string;
 };
 
 function GroupReportSection(input: {
+  stepLabel: string;
+  frameClassName?: string;
   title: string;
+  description: string;
   summary: string;
   keyFindings: string[];
   documents: GroupDocumentItem[];
   requirements: GroupRequirementItem[];
 }) {
-  const stageClassName = getGroupStageClassName(input.title);
   return (
-    <section className={`review-column comparison-report-block ${stageClassName}`.trim()}>
-      <div className="section-header">
-        <h3>{input.title}</h3>
-      </div>
-      <div className="info-card">
-        <strong>요약</strong>
-        <p className="helper-text detailed-empty-reason">{input.summary}</p>
-      </div>
-      {input.keyFindings.length > 0 ? (
-        <div className="info-card">
-          <strong>핵심 정리</strong>
-          <ul className="plain-list">
-            {input.keyFindings.map((item) => (
-              <li key={`${input.title}-${item}`}>{item}</li>
-            ))}
-          </ul>
+    <section
+      className={`review-column comparison-source-column comparison-review-stage-frame comparison-report-block ${input.frameClassName ?? ""}`.trim()}
+    >
+      <div className="section-header comparison-frame-header comparison-stage-frame-header">
+        <div className="comparison-stage-frame-head">
+          <h3>{input.title}</h3>
+          <span className="comparison-report-stage-step">{input.stepLabel}</span>
         </div>
-      ) : null}
+        <p>{input.description}</p>
+      </div>
+      <SummarySection summary={input.summary} emptyText="요약이 없습니다." />
+      <ReportTableSection
+        title="핵심 정리"
+        columns={["번호", "내용"]}
+        rows={input.keyFindings.map((item, index) => [String(index + 1), item])}
+        emptyText="핵심 정리 항목이 없습니다."
+      />
       <section className="review-column">
-        <div className="section-header">
+        <div className="section-header compact-section-header">
           <h3>{`${input.title} 문서별 정리`}</h3>
         </div>
-        {input.documents.length === 0 ? (
-          <div className="info-card">
-            <strong>문서별 정리 항목이 없습니다.</strong>
-          </div>
-        ) : (
-          <div className="stack">
-            {input.documents.map((item) => (
-              <article key={item.id} className="diff-card guidance-card">
-                <strong className="guidance-card-title">{item.title}</strong>
-                {item.keyPoints.length > 0 ? (
-                  <ul className="plain-list">
-                    {item.keyPoints.map((point) => (
-                      <li key={`${item.id}-${point}`}>{point}</li>
-                    ))}
-                  </ul>
-                ) : null}
-                <div className="text-compare-card after">
-                  <span className="muted-label">근거 경로</span>
-                  <pre className="source-block compact">
-                    {item.sourcePaths.length > 0 ? item.sourcePaths.join("\n") : "해당 없음"}
-                  </pre>
-                </div>
-              </article>
-            ))}
-          </div>
-        )}
+        <ReportTableSection
+          title=""
+          columns={["문서", "핵심 정리", "근거 경로"]}
+          rows={buildDocumentRows(input.documents)}
+          emptyText="문서별 정리 항목이 없습니다."
+          hideTitle
+        />
       </section>
       <section className="review-column">
-        <div className="section-header">
+        <div className="section-header compact-section-header">
           <h3>{`${input.title} 통합 요구사항`}</h3>
         </div>
-        {input.requirements.length === 0 ? (
-          <div className="info-card">
-            <strong>통합 요구사항이 없습니다.</strong>
-          </div>
-        ) : (
-          <div className="stack">
-            {input.requirements.map((item) => (
-              <article key={item.id} className="diff-card guidance-card">
-                <strong className="guidance-card-title">{item.topic}</strong>
-                <p>{item.detail}</p>
-                {item.sourceTitles.length > 0 ? (
-                  <p className="helper-text">출처 문서: {item.sourceTitles.join(", ")}</p>
-                ) : null}
-                <div className="text-compare-card after">
-                  <span className="muted-label">근거 경로</span>
-                  <pre className="source-block compact">
-                    {item.sourcePaths.length > 0 ? item.sourcePaths.join("\n") : "해당 없음"}
-                  </pre>
-                </div>
-                {item.notes ? <p className="helper-text detailed-empty-reason">{item.notes}</p> : null}
-              </article>
-            ))}
-          </div>
-        )}
+        <ReportTableSection
+          title=""
+          columns={["주제", "내용", "출처 문서", "근거 경로", "비고"]}
+          rows={buildRequirementRows(input.requirements)}
+          emptyText="통합 요구사항이 없습니다."
+          hideTitle
+        />
       </section>
     </section>
   );
 }
 
-function ComparisonReportSection(input: { guidance: AiComparisonReport | null }) {
+function ComparisonReportSection(input: {
+  stepLabel: string;
+  frameClassName?: string;
+  title: string;
+  description: string;
+  guidance: AiComparisonReport | null;
+  apiCallCount: number;
+  model: string;
+  analysisStageLabel: string | null;
+}) {
   const report = input.guidance;
 
   return (
-    <section className="review-column comparison-report-block comparison-report-block-final">
-      <div className="section-header">
-        <h3>최종 비교 리포트</h3>
+    <section
+      className={`review-column comparison-source-column comparison-review-stage-frame comparison-report-block ${input.frameClassName ?? ""}`.trim()}
+    >
+      <div className="section-header comparison-frame-header comparison-stage-frame-header">
+        <div className="comparison-stage-frame-head">
+          <h3>{input.title}</h3>
+          <span className="comparison-report-stage-step">{input.stepLabel}</span>
+        </div>
+        <p>{input.description}</p>
       </div>
-      <div className="info-card">
-        <strong>비교 요약</strong>
-        <p className="helper-text detailed-empty-reason">
-          {report?.summary ?? "왼쪽/오른쪽 그룹 정리가 끝난 뒤 최종 비교 리포트를 생성합니다."}
-        </p>
-      </div>
+      <SummarySection
+        summary={report?.summary ?? "비교 대상/기준 정리가 끝난 뒤 최종 비교 리포트를 생성합니다."}
+        emptyText="요약이 없습니다."
+      />
       <GuidanceSection
         title="개정 필요 항목"
         emptyText="개정 필요 항목이 없습니다."
@@ -823,123 +899,162 @@ function ComparisonReportSection(input: { guidance: AiComparisonReport | null })
           reason: `${item.gap_type} | 우측 기준: ${item.right_requirement}\n현재 상태: ${item.left_current_state}\n위험: ${item.risk}`,
         }))}
       />
-      {report && report.well_covered_items.length > 0 ? (
-        <div className="info-card">
-          <strong>이미 충분히 반영된 항목</strong>
-          <div className="stack">
-            {report.well_covered_items.map((item) => (
-              <article key={`${item.topic}-${item.reason}`} className="diff-card guidance-card">
-                <strong className="guidance-card-title">{item.topic}</strong>
-                <p>{item.reason}</p>
-                <div className="text-compare-card after">
-                  <span className="muted-label">정책 근거</span>
-                  <pre className="source-block compact">
-                    {item.policy_evidence_paths.length > 0
-                      ? item.policy_evidence_paths.join("\n")
-                      : "해당 없음"}
-                  </pre>
-                </div>
-                <div className="text-compare-card after">
-                  <span className="muted-label">기준 근거</span>
-                  <pre className="source-block compact">
-                    {item.comparison_evidence_paths.length > 0
-                      ? item.comparison_evidence_paths.join("\n")
-                      : "해당 없음"}
-                  </pre>
-                </div>
-              </article>
-            ))}
-          </div>
-        </div>
-      ) : null}
-      {report && report.document_actions.length > 0 ? (
-        <div className="warning-card">
-          <strong>문서별 조치</strong>
-          <div className="stack">
-            {report.document_actions.map((item) => (
-              <article key={`${item.document_id}-${item.document_title}`} className="diff-card guidance-card">
-                <strong className="guidance-card-title">{item.document_title}</strong>
-                <ul className="plain-list">
-                  {item.actions.map((action, index) => (
-                    <li key={`${item.document_id}-${index}-${action.target_section_path}`}>
-                      [{action.action}] {action.target_section_path} - {action.instruction}
-                    </li>
-                  ))}
-                </ul>
-              </article>
-            ))}
-          </div>
-        </div>
-      ) : null}
-      {report && report.remaining_watchpoints.length > 0 ? (
-        <div className="warning-card">
-          <strong>남은 관찰 포인트</strong>
-          <ul className="plain-list">
-            {report.remaining_watchpoints.map((item) => (
-              <li key={item}>{item}</li>
-            ))}
-          </ul>
-        </div>
-      ) : null}
-      {report && report.low_confidence_notes.length > 0 ? (
-        <div className="warning-card">
-          <strong>저신뢰 메모</strong>
-          <ul className="plain-list">
-            {report.low_confidence_notes.map((item) => (
-              <li key={item}>{item}</li>
-            ))}
-          </ul>
-        </div>
-      ) : null}
+      <ReportTableSection
+        title="이미 충분히 반영된 항목"
+        columns={["주제", "판단", "정책 근거", "기준 근거"]}
+        rows={(report?.well_covered_items ?? []).map((item) => [
+          item.topic,
+          item.reason,
+          joinListForCell(item.policy_evidence_paths),
+          joinListForCell(item.comparison_evidence_paths),
+        ])}
+        emptyText="이미 충분히 반영된 항목이 없습니다."
+      />
+      <ReportTableSection
+        title="문서별 조치"
+        columns={["문서", "조치"]}
+        rows={(report?.document_actions ?? []).map((item) => [
+          item.document_title,
+          joinListForCell(
+            item.actions.map(
+              (action) => `[${action.action}] ${action.target_section_path} - ${action.instruction}`,
+            ),
+          ),
+        ])}
+        emptyText="문서별 조치가 없습니다."
+      />
+      <ReportTableSection
+        title="남은 관찰 포인트"
+        columns={["번호", "내용"]}
+        rows={(report?.remaining_watchpoints ?? []).map((item, index) => [String(index + 1), item])}
+        emptyText="남은 관찰 포인트가 없습니다."
+      />
+      <ReportTableSection
+        title="저신뢰 메모"
+        columns={["번호", "내용"]}
+        rows={(report?.low_confidence_notes ?? []).map((item, index) => [String(index + 1), item])}
+        emptyText="저신뢰 메모가 없습니다."
+      />
     </section>
   );
 }
 
-function getGroupStageClassName(title: string) {
-  if (title.includes("왼쪽")) {
-    return "comparison-report-block-left";
-  }
-
-  if (title.includes("오른쪽")) {
-    return "comparison-report-block-right";
-  }
-
-  return "";
+function runStageWithTimeout<T>(label: string, promise: Promise<T>) {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) => {
+      window.setTimeout(() => {
+        reject(new Error(`${label} 응답이 ${Math.round(STAGE_REQUEST_TIMEOUT_MS / 1000)}초를 넘겨 지연되고 있습니다.`));
+      }, STAGE_REQUEST_TIMEOUT_MS);
+    }),
+  ]);
 }
 
-function getStageProgress(input: {
+function readSavedAnalysisHistory(storageKey?: string) {
+  if (!storageKey || typeof window === "undefined") {
+    return [] as SavedAnalysisHistoryEntry[];
+  }
+
+  const raw = window.localStorage.getItem(storageKey);
+  if (!raw) {
+    return [] as SavedAnalysisHistoryEntry[];
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as SavedAnalysisHistoryEntry[];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [] as SavedAnalysisHistoryEntry[];
+  }
+}
+
+function writeSavedAnalysisHistory(storageKey: string | undefined, entries: SavedAnalysisHistoryEntry[]) {
+  if (!storageKey || typeof window === "undefined") {
+    return;
+  }
+
+  window.localStorage.setItem(storageKey, JSON.stringify(entries));
+}
+
+function formatSavedHistoryTimestamp(value: string) {
+  try {
+    return new Date(value).toLocaleString("ko-KR", {
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  } catch {
+    return value;
+  }
+}
+
+function createSavedHistoryEntry(input: {
+  selectionSummary: string;
+  selectionCounts: SavedAnalysisHistoryEntry["selectionCounts"];
+  guidance: AiRevisionGuidance;
+}): SavedAnalysisHistoryEntry {
+  return {
+    id: crypto.randomUUID(),
+    createdAt: new Date().toISOString(),
+    title: `좌측 ${input.selectionCounts.leftDocumentCount}건 · 우측 ${input.selectionCounts.rightDocumentCount}건 · 법령 ${input.selectionCounts.rightLawCount}건`,
+    selectionSummary: input.selectionSummary,
+    selectionCounts: input.selectionCounts,
+    guidance: input.guidance,
+  };
+}
+
+function buildSavedHistorySignature(input: {
+  selectionCounts: SavedAnalysisHistoryEntry["selectionCounts"];
+  guidance: AiRevisionGuidance;
+}) {
+  return JSON.stringify({
+    selectionCounts: input.selectionCounts,
+    model: input.guidance.model,
+    apiCallCount: input.guidance.api_call_count,
+    leftSummary: input.guidance.left_group_report.summary,
+    rightSummary: input.guidance.right_group_report.summary,
+    comparisonSummary: input.guidance.comparison_report.summary,
+  });
+}
+
+export function getStageProgress(input: {
   leftGroupReport: AiGroupReport | null;
   rightGroupReport: AiGroupReport | null;
   comparisonReport: AiComparisonReport | null;
   isAnalyzingSelection: boolean;
   analysisStageLabel: string | null;
+  analysisStagePhase: AnalysisStagePhase;
+  analysisStageStartedAt: number | null;
+  now: number;
 }) {
   const steps = [
     {
       id: "left",
-      label: "1단계 프로그레스바",
+      label: "1단계",
       status: input.leftGroupReport ? "done" : input.isAnalyzingSelection ? "active" : "idle",
       statusLabel: input.leftGroupReport ? "완료" : input.isAnalyzingSelection ? "진행 중" : "대기",
-      percent: input.leftGroupReport ? 100 : input.isAnalyzingSelection ? 56 : 0,
+      percent: input.leftGroupReport ? 100 : 0,
     },
     {
       id: "right",
-      label: "2단계 프로그레스바",
+      label: "2단계",
       status: input.rightGroupReport
         ? "done"
-        : input.leftGroupReport && input.isAnalyzingSelection
+        : input.isAnalyzingSelection && input.analysisStagePhase === "right"
           ? "active"
           : "idle",
       statusLabel: input.rightGroupReport
         ? "완료"
-        : input.leftGroupReport && input.isAnalyzingSelection
+        : input.isAnalyzingSelection && input.analysisStagePhase === "right"
           ? "진행 중"
           : "대기",
-      percent: input.rightGroupReport ? 100 : input.leftGroupReport && input.isAnalyzingSelection ? 56 : 0,
+      percent: input.rightGroupReport ? 100 : 0,
     },
     {
       id: "final",
-      label: "3단계 프로그레스바",
+      label: "3단계",
       status: input.comparisonReport
         ? "done"
         : input.rightGroupReport && input.isAnalyzingSelection
@@ -950,14 +1065,14 @@ function getStageProgress(input: {
         : input.rightGroupReport && input.isAnalyzingSelection
           ? "진행 중"
           : "대기",
-      percent: input.comparisonReport ? 100 : input.rightGroupReport && input.isAnalyzingSelection ? 56 : 0,
+      percent: input.comparisonReport ? 100 : 0,
     },
   ] as const;
 
   if (input.comparisonReport) {
     return {
       label: "최종 비교 완료",
-      detail: "왼쪽 정리, 오른쪽 정리, 최종 비교 리포트가 모두 채워졌습니다.",
+      detail: "비교 대상 정리, 기준 정리, 최종 비교 리포트가 모두 채워졌습니다.",
       percent: 100,
       steps,
     };
@@ -965,20 +1080,20 @@ function getStageProgress(input: {
 
   if (input.rightGroupReport) {
     return {
-      label: input.isAnalyzingSelection ? "최종 비교 진행 중" : "오른쪽 정리 완료",
+      label: input.isAnalyzingSelection ? "최종 비교 진행 중" : "기준 정리 완료",
       detail:
-        input.analysisStageLabel ?? "오른쪽 그룹 정리가 끝났고 최종 비교 리포트를 준비하고 있습니다.",
-      percent: input.isAnalyzingSelection ? 82 : 66,
+        input.analysisStageLabel ?? "기준 정리가 끝났고 최종 비교 리포트를 준비하고 있습니다.",
+      percent: input.isAnalyzingSelection ? 66 : 66,
       steps,
     };
   }
 
   if (input.leftGroupReport) {
     return {
-      label: input.isAnalyzingSelection ? "오른쪽 정리 진행 중" : "왼쪽 정리 완료",
+      label: input.isAnalyzingSelection ? "기준 정리 진행 중" : "왼쪽 정리 완료",
       detail:
-        input.analysisStageLabel ?? "왼쪽 그룹 정리가 끝났고 오른쪽 그룹 정리를 준비하고 있습니다.",
-      percent: input.isAnalyzingSelection ? 48 : 33,
+        input.analysisStageLabel ?? "왼쪽 그룹 정리가 끝났고 기준 정리를 준비하고 있습니다.",
+      percent: input.rightGroupReport ? 66 : 33,
       steps,
     };
   }
@@ -986,8 +1101,8 @@ function getStageProgress(input: {
   if (input.isAnalyzingSelection) {
     return {
       label: "왼쪽 정리 진행 중",
-      detail: input.analysisStageLabel ?? "첫 단계 리포트를 생성하고 있습니다.",
-      percent: 16,
+      detail: input.analysisStageLabel ?? "단계 리포트를 생성하고 있습니다.",
+      percent: 0,
       steps,
     };
   }
@@ -1012,45 +1127,173 @@ function GuidanceSection(input: {
         <h3>{input.title}</h3>
       </div>
       {input.items.length === 0 ? (
-        <div className="info-card">
-          <strong>{input.emptyText}</strong>
-          <p className="helper-text detailed-empty-reason">{input.emptyReason}</p>
-        </div>
+        <ReportTableSection
+          title=""
+          columns={["상태", "내용"]}
+          rows={[["안내", `${input.emptyText}\n${input.emptyReason}`]]}
+          emptyText={input.emptyText}
+          hideTitle
+        />
       ) : (
-        <div className="stack">
-          {input.items.map((item) => (
-            <article key={item.id} className="diff-card guidance-card">
-              <strong className="guidance-card-title">{item.title}</strong>
-              <div className="pill-row">
-                <span className="pill neutral">반영 대상 {item.targetPath}</span>
-                <span className="pill neutral">비교 기준 {item.comparisonSourceTitle}</span>
-                <span className="pill neutral">
-                  신뢰도 {Math.round(item.confidence * 100)}%
-                </span>
-              </div>
-              <div className="text-compare-card after">
-                <span className="muted-label">정책/지침 근거 위치</span>
-                <pre className="source-block compact">
-                  {item.policyEvidence.length > 0 ? item.policyEvidence.join("\n") : "해당 없음"}
-                </pre>
-              </div>
-              <div className="text-compare-card after">
-                <span className="muted-label">우측 그룹 근거 위치</span>
-                <pre className="source-block compact">
-                  {item.comparisonEvidence.length > 0 ? item.comparisonEvidence.join("\n") : "해당 없음"}
-                </pre>
-              </div>
-              <div className="text-compare-card after">
-                <span className="muted-label">조치 가이드</span>
-                <pre className="source-block compact">{item.action}</pre>
-              </div>
-              <p>{item.reason}</p>
-            </article>
-          ))}
-        </div>
+        <ReportTableSection
+          title=""
+          columns={["주제", "대상 경로", "기준", "정책 근거", "기준 근거", "조치", "신뢰도", "사유"]}
+          rows={buildGuidanceRows(input.items)}
+          emptyText={input.emptyText}
+          hideTitle
+        />
       )}
     </section>
   );
+}
+
+function ReportTableSection(input: {
+  title: string;
+  columns: string[];
+  rows: string[][];
+  emptyText: string;
+  hideTitle?: boolean;
+}) {
+  return (
+    <section className="review-column comparison-table-section">
+      {!input.hideTitle ? (
+        <div className="section-header compact-section-header">
+          <h3>{input.title}</h3>
+        </div>
+      ) : null}
+      <div className="comparison-table-wrap">
+        <table className="comparison-data-table">
+          <thead>
+            <tr>
+              {input.columns.map((column) => (
+                <th key={column}>{column}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {input.rows.length === 0 ? (
+              <tr>
+                {input.columns.map((column, index) => (
+                  <td
+                    key={`${input.title}-empty-${column}`}
+                    className={`comparison-table-empty ${index === 0 ? "comparison-table-empty-primary" : ""}`.trim()}
+                  >
+                    {index === 0 ? input.emptyText : "-"}
+                  </td>
+                ))}
+              </tr>
+            ) : (
+              input.rows.map((row, index) => (
+                <tr key={`${input.title}-${index}`}>
+                  {row.map((cell, cellIndex) => (
+                    <td key={`${input.title}-${index}-${cellIndex}`}>{cell}</td>
+                  ))}
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+function SummarySection(input: { summary: string; emptyText: string }) {
+  const content = input.summary.trim() || input.emptyText;
+
+  return (
+    <section className="review-column comparison-summary-section">
+      <div className="info-card comparison-report-summary-card ai-summary-card">
+        <p className="comparison-report-summary-copy">{content}</p>
+      </div>
+    </section>
+  );
+}
+
+function joinListForCell(items: string[]) {
+  if (items.length === 0) {
+    return "-";
+  }
+
+  return items.join("\n");
+}
+
+function buildDocumentRows(items: GroupDocumentItem[]) {
+  return items.flatMap((item) => {
+    const rowCount = Math.max(item.evidencePairs.length, 1);
+    return Array.from({ length: rowCount }, (_, index) => [
+      index === 0 ? item.title : "",
+      item.evidencePairs[index]?.keyPoint ?? "-",
+      item.evidencePairs[index]?.sourcePath ?? "-",
+    ]);
+  });
+}
+
+function buildRequirementRows(items: GroupRequirementItem[]) {
+  return items.flatMap((item) => {
+    const rowCount = Math.max(item.evidencePairs.length, 1);
+    return Array.from({ length: rowCount }, (_, index) => [
+      index === 0 ? item.topic : "",
+      index === 0 ? item.detail : "",
+      item.evidencePairs[index]?.sourceTitle ?? "-",
+      item.evidencePairs[index]?.sourcePath ?? "-",
+      index === 0 ? item.notes || "-" : "",
+    ]);
+  });
+}
+
+function normalizeDocumentEvidencePairs(item: AiGroupReport["documents"][number]) {
+  if (item.evidence_pairs && item.evidence_pairs.length > 0) {
+    return item.evidence_pairs
+      .map((pair) => ({
+        keyPoint: pair.key_point.trim() || "-",
+        sourcePath: pair.source_path.trim() || "-",
+      }));
+  }
+
+  return zipEvidencePairs(item.key_points, item.source_paths).map(([keyPoint, sourcePath]) => ({
+    keyPoint,
+    sourcePath,
+  }));
+}
+
+function normalizeRequirementEvidencePairs(item: AiGroupReport["merged_requirements"][number]) {
+  if (item.evidence_pairs && item.evidence_pairs.length > 0) {
+    return item.evidence_pairs
+      .map((pair) => ({
+        sourceTitle: pair.source_title.trim() || "-",
+        sourcePath: pair.source_path.trim() || "-",
+      }));
+  }
+
+  return zipEvidencePairs(item.source_titles, item.source_paths).map(([sourceTitle, sourcePath]) => ({
+    sourceTitle,
+    sourcePath,
+  }));
+}
+
+function zipEvidencePairs(left: string[], right: string[]) {
+  const rowCount = Math.max(left.length, right.length, 1);
+  return Array.from({ length: rowCount }, (_, index) => [
+    left[index]?.trim() || "-",
+    right[index]?.trim() || "-",
+  ] as const);
+}
+
+function buildGuidanceRows(items: GuidanceItem[]) {
+  return items.flatMap((item) => {
+    const rowCount = Math.max(item.policyEvidence.length, item.comparisonEvidence.length, 1);
+    return Array.from({ length: rowCount }, (_, index) => [
+      index === 0 ? item.title : "",
+      index === 0 ? item.targetPath : "",
+      index === 0 ? item.comparisonSourceTitle : "",
+      item.policyEvidence[index] ?? "-",
+      item.comparisonEvidence[index] ?? "-",
+      index === 0 ? item.action : "",
+      index === 0 ? `${Math.round(item.confidence * 100)}%` : "",
+      index === 0 ? item.reason : "",
+    ]);
+  });
 }
 
 function toRevisionStatusLabel(status: ComparisonReviewDetail["revision_status"]) {
@@ -1088,7 +1331,7 @@ function getSelectionSummary(
   referenceDocumentCount: number,
   selectedLawVersionCount: number,
 ) {
-  return `좌측 정책·지침 ${selectedDocumentCount}건, 우측 기준 문서 ${referenceDocumentCount}건, 기준 법률 ${selectedLawVersionCount}건이 현재 분석 범위에 포함되어 있습니다.`;
+  return `비교 대상 ${selectedDocumentCount}개, 기준 ${referenceDocumentCount + selectedLawVersionCount}개가 현재 분석 범위에 포함되어 있습니다.`;
 }
 
 function describeComparisonWarning(warning: string) {

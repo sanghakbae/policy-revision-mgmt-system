@@ -49,13 +49,6 @@ export function DocumentUploadForm({
 
   return (
     <form className="stack" onSubmit={handleSubmit}>
-      <div className="section-header">
-        <h2>정책·지침 업로드</h2>
-        <p>
-          현재 범위에서는 결정론적 파싱과 검토 가능성을 유지하기 위해
-          텍스트 문서와 Word(.doc, .docx) 문서를 받습니다.
-        </p>
-      </div>
       {disabledReason ? (
         <div className="warning-card detail-card">
           <strong>업로드가 잠겨 있습니다.</strong>
@@ -88,7 +81,7 @@ export function DocumentUploadForm({
           onChange={(event) => setDescription(event.target.value)}
           placeholder="검토자를 위한 설명을 입력하세요"
           disabled={disabled || isSubmitting}
-          rows={4}
+          rows={2}
         />
       </label>
       <label className="field">

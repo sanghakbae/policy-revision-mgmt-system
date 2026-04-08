@@ -184,6 +184,10 @@ export interface AiGroupReportDocument {
   document_title: string;
   key_points: string[];
   source_paths: string[];
+  evidence_pairs?: Array<{
+    key_point: string;
+    source_path: string;
+  }>;
 }
 
 export interface AiGroupReportRequirement {
@@ -192,6 +196,10 @@ export interface AiGroupReportRequirement {
   source_titles: string[];
   source_paths: string[];
   notes: string;
+  evidence_pairs?: Array<{
+    source_title: string;
+    source_path: string;
+  }>;
 }
 
 export interface AiGroupReport {
@@ -249,12 +257,34 @@ export interface AiComparisonReport {
 
 export type AiRevisionAnalysisStage = "left" | "right" | "final";
 
+export interface AiRevisionPromptOverrides {
+  left: string;
+  right: string;
+  final: string;
+}
+
 export interface AiRevisionGuidance {
   left_group_report: AiGroupReport;
   right_group_report: AiGroupReport;
   comparison_report: AiComparisonReport;
   model: string | null;
   api_call_count: number;
+}
+
+export interface AnalysisSelectionCounts {
+  leftDocumentCount: number;
+  rightDocumentCount: number;
+  rightLawCount: number;
+}
+
+export interface SavedAnalysisHistoryEntry {
+  id: string;
+  createdAt: string;
+  title: string;
+  fileName?: string;
+  selectionSummary: string;
+  selectionCounts: AnalysisSelectionCounts;
+  guidance: AiRevisionGuidance;
 }
 
 export interface AiRevisionStageResult {

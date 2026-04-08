@@ -1,5 +1,10 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
 import { corsHeaders } from "../_shared/cors.ts";
+import {
+  COMPARISON_REPORT_INSTRUCTIONS,
+  LEFT_REPORT_INSTRUCTIONS,
+  RIGHT_REPORT_INSTRUCTIONS,
+} from "../../../shared/analysisPrompts.ts";
 
 interface AnalyzeSelectedRevisionsRequest {
   stage?: "left" | "right" | "final";
@@ -8,11 +13,17 @@ interface AnalyzeSelectedRevisionsRequest {
   lawVersionIds: string[];
   leftGroupReport?: GroupReportResponse;
   rightGroupReport?: GroupReportResponse;
+  promptOverrides?: {
+    left?: string;
+    right?: string;
+    final?: string;
+  };
 }
 
 interface OpenAIResponsesApiResponse {
   output_parsed?: unknown;
   output_text?: string;
+  output?: unknown[];
 }
 
 interface GroupReportDocument {
@@ -81,40 +92,9 @@ interface ComparisonReportResponse {
   remaining_watchpoints: string[];
 }
 
-const MAX_SECTIONS_PER_DOCUMENT = 40;
-const MAX_SECTION_TEXT_LENGTH = 280;
-const OPENAI_TIMEOUT_MS = 45000;
-const LEFT_REPORT_INSTRUCTIONS = [
-  "너는 왼쪽 그룹의 정책·지침 문서를 누락 없이 정리하는 검토자다.",
-  "입력에 포함된 문서만 사용하고 없는 내용을 추정하지 마라.",
-  "요약이 아니라 실제 의무, 절차, 책임, 증빙, 예외, 주기, 통제 항목을 상세하게 재구성하라.",
-  "중복 항목은 병합할 수 있지만 문서명과 경로 추적은 유지하라.",
-  "source_paths에는 반드시 입력으로 제공된 경로만 넣어라.",
-  "문서별 key_points는 실질 요구사항 중심으로 작성하라.",
-  "merged_requirements는 왼쪽 그룹 전체를 대표하는 통합 요구사항이어야 한다.",
-  "반드시 JSON만 반환하라.",
-].join(" ");
-
-const RIGHT_REPORT_INSTRUCTIONS = [
-  "너는 오른쪽 그룹의 기준 문서와 법률을 기업 준거 기준으로 정리하는 검토자다.",
-  "입력에 포함된 문서와 법령만 사용하라.",
-  "일반 기업에 실질적으로 영향을 주는 의무, 절차, 통제, 기록, 보고, 보관, 책임 기준을 상세하게 추출하라.",
-  "공공부문 전용 조항은 notes에서 적용상 한계를 분명히 적어라.",
-  "source_paths에는 반드시 입력으로 제공된 경로만 넣어라.",
-  "documents와 merged_requirements 모두 누락 없이 작성하라.",
-  "반드시 JSON만 반환하라.",
-].join(" ");
-
-const COMPARISON_REPORT_INSTRUCTIONS = [
-  "너는 왼쪽 그룹 정리본과 오른쪽 그룹 정리본을 비교해 개정 필요사항을 도출하는 준거성 검토자다.",
-  "오른쪽 기준 대비 왼쪽에 없는 항목, 약한 항목, 모호한 항목, 절차나 증빙이 빠진 항목을 모두 찾아라.",
-  "과잉 권고는 하지 말고 근거 경로가 있는 경우만 판단하라.",
-  "gaps에는 실제 개정 지시 수준으로 구체적으로 적어라.",
-  "document_actions는 문서별 후속 조치를 정리하라.",
-  "well_covered_items에는 이미 충분히 커버된 항목만 넣어라.",
-  "반드시 JSON만 반환하라.",
-].join(" ");
-
+const MAX_SECTIONS_PER_DOCUMENT = 24;
+const MAX_SECTION_TEXT_LENGTH = 180;
+const OPENAI_TIMEOUT_MS = 180000;
 Deno.serve(async (request) => {
   if (request.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
@@ -153,6 +133,7 @@ Deno.serve(async (request) => {
 
     const body = (await request.json()) as AnalyzeSelectedRevisionsRequest;
     const stage = body.stage ?? "final";
+    const promptOverrides = body.promptOverrides ?? {};
     const targetDocumentIds = [...new Set(body.targetDocumentIds ?? [])].filter(Boolean);
     const referenceDocumentIds = [...new Set(body.referenceDocumentIds ?? [])].filter(Boolean);
     const lawVersionIds = [...new Set(body.lawVersionIds ?? [])].filter(Boolean);
@@ -186,6 +167,7 @@ Deno.serve(async (request) => {
         apiKey: openAiApiKey,
         model: openAiModel,
         targetDocuments,
+        instructions: resolveInstructions(LEFT_REPORT_INSTRUCTIONS, promptOverrides.left),
       });
     } else if (stage === "right") {
       rightGroupReport = await analyzeRightGroup({
@@ -193,6 +175,7 @@ Deno.serve(async (request) => {
         model: openAiModel,
         referenceDocuments,
         laws,
+        instructions: resolveInstructions(RIGHT_REPORT_INSTRUCTIONS, promptOverrides.right),
       });
     } else {
       leftGroupReport = validateGroupReportResponse(body.leftGroupReport);
@@ -202,6 +185,7 @@ Deno.serve(async (request) => {
         model: openAiModel,
         leftGroupReport,
         rightGroupReport,
+        instructions: resolveInstructions(COMPARISON_REPORT_INSTRUCTIONS, promptOverrides.final),
       });
     }
 
@@ -362,6 +346,7 @@ async function analyzeLeftGroup(input: {
   apiKey: string;
   model: string;
   targetDocuments: unknown[];
+  instructions: string;
 }) {
   const payload = {
     group_name: "left",
@@ -372,7 +357,7 @@ async function analyzeLeftGroup(input: {
   return await analyzeWithOpenAi<GroupReportResponse>({
     apiKey: input.apiKey,
     model: input.model,
-    instructions: LEFT_REPORT_INSTRUCTIONS,
+    instructions: input.instructions,
     promptInput: payload,
     schemaName: "left_group_report",
     schema: {
@@ -422,6 +407,7 @@ async function analyzeRightGroup(input: {
   model: string;
   referenceDocuments: unknown[];
   laws: unknown[];
+  instructions: string;
 }) {
   const payload = {
     group_name: "right",
@@ -433,7 +419,7 @@ async function analyzeRightGroup(input: {
   return await analyzeWithOpenAi<GroupReportResponse>({
     apiKey: input.apiKey,
     model: input.model,
-    instructions: RIGHT_REPORT_INSTRUCTIONS,
+    instructions: input.instructions,
     promptInput: payload,
     schemaName: "right_group_report",
     schema: {
@@ -483,6 +469,7 @@ async function analyzeComparison(input: {
   model: string;
   leftGroupReport: GroupReportResponse;
   rightGroupReport: GroupReportResponse;
+  instructions: string;
 }) {
   const payload = {
     task: "좌우 그룹 상세 비교",
@@ -493,7 +480,7 @@ async function analyzeComparison(input: {
   return await analyzeWithOpenAi<ComparisonReportResponse>({
     apiKey: input.apiKey,
     model: input.model,
-    instructions: COMPARISON_REPORT_INSTRUCTIONS,
+    instructions: input.instructions,
     promptInput: payload,
     schemaName: "comparison_report",
     schema: {
@@ -640,15 +627,12 @@ async function analyzeWithOpenAi<T>(input: {
   }
 
   const payload = (await response.json()) as OpenAIResponsesApiResponse;
-  if (payload.output_parsed && typeof payload.output_parsed === "object") {
-    return input.validator(payload.output_parsed);
+  const structuredPayload = extractStructuredPayload(payload);
+  if (structuredPayload) {
+    return input.validator(structuredPayload);
   }
 
-  if (payload.output_text?.trim()) {
-    return input.validator(JSON.parse(payload.output_text));
-  }
-
-  throw new Error("OpenAI API returned no structured analysis payload.");
+  throw new Error(buildMissingStructuredPayloadError(payload));
 }
 
 function validateGroupReportResponse(value: unknown): GroupReportResponse {
@@ -862,6 +846,91 @@ async function getCumulativeOpenAiApiCallCount(
 function extractBearerToken(value: string | null) {
   const match = value?.match(/^Bearer\s+(.+)$/i);
   return match?.[1]?.trim() ?? null;
+}
+
+function resolveInstructions(defaultInstructions: string, override?: string) {
+  return typeof override === "string" && override.trim().length > 0
+    ? override.trim()
+    : defaultInstructions;
+}
+
+function extractStructuredPayload(payload: OpenAIResponsesApiResponse) {
+  if (payload.output_parsed && typeof payload.output_parsed === "object") {
+    return payload.output_parsed;
+  }
+
+  const parsedTopLevelText = tryParseJsonText(payload.output_text);
+  if (parsedTopLevelText) {
+    return parsedTopLevelText;
+  }
+
+  if (!Array.isArray(payload.output)) {
+    return null;
+  }
+
+  for (const item of payload.output) {
+    if (!item || typeof item !== "object") {
+      continue;
+    }
+
+    const message = item as Record<string, unknown>;
+    if (!Array.isArray(message.content)) {
+      continue;
+    }
+
+    for (const part of message.content) {
+      if (!part || typeof part !== "object") {
+        continue;
+      }
+
+      const contentPart = part as Record<string, unknown>;
+      if (contentPart.parsed && typeof contentPart.parsed === "object") {
+        return contentPart.parsed;
+      }
+
+      const parsedContentText = tryParseJsonText(
+        typeof contentPart.text === "string" ? contentPart.text : null,
+      );
+      if (parsedContentText) {
+        return parsedContentText;
+      }
+    }
+  }
+
+  return null;
+}
+
+function tryParseJsonText(value: string | undefined | null) {
+  if (!value?.trim()) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function buildMissingStructuredPayloadError(payload: OpenAIResponsesApiResponse) {
+  const outputSummary = Array.isArray(payload.output)
+    ? payload.output
+        .map((item) => {
+          if (!item || typeof item !== "object") {
+            return "unknown";
+          }
+
+          const record = item as Record<string, unknown>;
+          const type = typeof record.type === "string" ? record.type : "unknown";
+          const status = typeof record.status === "string" ? record.status : "unknown";
+          return `${type}:${status}`;
+        })
+        .join(", ")
+    : "none";
+  const outputTextPreview = clipText(payload.output_text ?? "", 400);
+
+  return `OpenAI API returned no structured analysis payload. output=${outputSummary} output_text=${outputTextPreview || "empty"}`;
 }
 
 function clipText(value: string, maxLength: number) {

@@ -42,14 +42,14 @@ export function AuthPanel({ session }: AuthPanelProps) {
   }
 
   return (
-    <div className="stack">
-      <div className="section-header">
-        <h2>인증</h2>
-        <p>비공개 작업은 모두 인증된 Supabase 사용자만 수행할 수 있습니다.</p>
+    <section className="auth-panel">
+      <div className="section-header auth-panel-header">
+        <h2>로그인</h2>
+        <p>Google OAuth로 인증한 뒤 문서 관리, 비교덱 구성, 검토 결과 기능을 사용할 수 있습니다.</p>
       </div>
 
       {session ? (
-        <div className="stack">
+        <div className="stack auth-panel-stack">
           <div className="info-card auth-account-card">
             <span className="muted-label">로그인 계정</span>
             <strong>{session.user.email}</strong>
@@ -62,7 +62,7 @@ export function AuthPanel({ session }: AuthPanelProps) {
           </button>
         </div>
       ) : (
-        <div className="stack">
+        <div className="stack auth-panel-stack">
           <div className="info-card auth-method-card">
             <span className="muted-label">로그인 방식</span>
             <strong>Google OAuth</strong>
@@ -80,7 +80,7 @@ export function AuthPanel({ session }: AuthPanelProps) {
         </div>
       )}
 
-      <p className="helper-text">{message}</p>
-    </div>
+      <p className="helper-text auth-panel-message">{message}</p>
+    </section>
   );
 }

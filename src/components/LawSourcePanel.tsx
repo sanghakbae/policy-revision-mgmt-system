@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { DocumentSummary, LawVersionSummary } from "../types";
+import type { ComparisonReviewOverviewSnapshot } from "./ComparisonReviewPanel";
 
 type WorkspaceFavoriteOption = {
   id: string;
@@ -30,6 +31,7 @@ interface LawSourcePanelProps {
   onSaveFavorite: () => void;
   onApplyFavorite: (favoriteId: string) => void;
   onDeleteFavorite: (favoriteId: string) => void;
+  overview?: ComparisonReviewOverviewSnapshot | null;
 }
 
 const POLICY_DRAG_PREFIX = "policy-document:";
@@ -58,6 +60,7 @@ export function LawSourcePanel({
   onSaveFavorite,
   onApplyFavorite,
   onDeleteFavorite,
+  overview = null,
 }: LawSourcePanelProps) {
   const [isComparing, setIsComparing] = useState(false);
   const [isMutatingLawVersionId, setIsMutatingLawVersionId] = useState<string | null>(null);
@@ -70,6 +73,10 @@ export function LawSourcePanel({
 
   const targetDocuments = documents.filter((document) => targetDocumentIds.includes(document.id));
   const referenceDocuments = documents.filter((document) => referenceDocumentIds.includes(document.id));
+  const availableDocuments = documents.filter(
+    (document) =>
+      !targetDocumentIds.includes(document.id) && !referenceDocumentIds.includes(document.id),
+  );
   const selectedLawVersions = lawVersions.filter((lawVersion) =>
     selectedLawVersionIds.includes(lawVersion.id),
   );
@@ -270,118 +277,27 @@ export function LawSourcePanel({
 
   return (
     <div className="stack">
-      <div className="info-card detail-card favorite-toolbar">
-        <div className="favorite-toolbar-copy">
-          <strong>배치 즐겨찾기</strong>
-          <p className="helper-text">
-            현재 좌우 문서 배치와 기준 법률 선택을 이름으로 저장하고 다시 불러옵니다.
-          </p>
-        </div>
-        <div className="favorite-toolbar-controls">
-          <select
-            className="favorite-select"
-            value={selectedFavoriteId}
-            onChange={(event) => setSelectedFavoriteId(event.target.value)}
-            disabled={favorites.length === 0}
-          >
-            <option value="">저장된 즐겨찾기 선택</option>
-            {favorites.map((favorite) => (
-              <option key={favorite.id} value={favorite.id}>
-                {favorite.name}
-              </option>
-            ))}
-          </select>
-          <button type="button" className="button ghost select-button" onClick={onSaveFavorite}>
-            현재 배치 저장
-          </button>
-          <button
-            type="button"
-            className="button ghost select-button"
-            disabled={!selectedFavoriteId}
-            onClick={() => onApplyFavorite(selectedFavoriteId)}
-          >
-            불러오기
-          </button>
-          <button
-            type="button"
-            className="button ghost select-button"
-            disabled={!selectedFavoriteId}
-            onClick={() => onDeleteFavorite(selectedFavoriteId)}
-          >
-            삭제
-          </button>
-        </div>
-      </div>
-      <div className="info-card detail-card">
-        <strong>비교 플로우 안내</strong>
-        <ul className="plain-list">
-          <li>좌측 그룹에는 개정 여부를 검토할 정책·지침을 넣습니다.</li>
-          <li>우측 그룹에는 비교 기준이 되는 문서나 법령을 넣습니다.</li>
-          <li>법령은 아래 목록에서 끌어오거나, 이미 선택된 항목을 재파싱할 수 있습니다.</li>
-        </ul>
-      </div>
-      {comparisonBlockingReason ? (
-        <div className="warning-card detail-card">
-          <strong>지금은 비교를 실행할 수 없습니다.</strong>
-          <p className="helper-text detailed-empty-reason">{comparisonBlockingReason}</p>
-        </div>
-      ) : (
-        <div className="info-card detail-card">
-          <strong>실행 조건 충족</strong>
-          <p className="helper-text detailed-empty-reason">
-            좌우 그룹이 모두 준비되었습니다. 비교를 실행하면 하단 검토 패널에 경고와 권고가 함께 표시됩니다.
-          </p>
-        </div>
-      )}
-      <div className="comparison-drop-grid">
-        <div
-          className={`comparison-drop-zone ${isTargetDropActive ? "drop-target-active" : ""}`}
-          onDragEnter={(event) => {
-            if (disabled || !hasPolicyDragPayload(event)) {
-              return;
-            }
-
-            event.preventDefault();
-            setIsTargetDropActive(true);
-          }}
-          onDragOver={(event) => {
-            if (disabled || !hasPolicyDragPayload(event)) {
-              return;
-            }
-
-            event.preventDefault();
-            event.dataTransfer.dropEffect = "copy";
-            if (!isTargetDropActive) {
-              setIsTargetDropActive(true);
-            }
-          }}
-          onDragLeave={(event) => {
-            if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
-              setIsTargetDropActive(false);
-            }
-          }}
-          onDrop={handlePolicyDrop}
-        >
-          <div className="selection-summary-card">
+      <div className="comparison-deck-grid">
+        <section className="comparison-source-column">
+          <div className="section-header comparison-frame-header">
+            <h3>문서 목록</h3>
+            <p>문서 목록에서 문서를 선택해 오른쪽 프레임으로 배치합니다.</p>
+          </div>
+          <div className="selection-summary-card comparison-source-summary">
             <div className="document-list-header">
-              <strong>비교 대상 정책 및 지침</strong>
-              <span className="document-title-prefix">{`${targetDocuments.length}건 선택됨`}</span>
+              <strong>문서 목록</strong>
+              <span className="document-title-prefix">{`${documents.length}건`}</span>
             </div>
             <span className="timestamp">
-              문서 목록에서 끌어다 놓아 비교할 정책·지침 그룹을 구성합니다.
+              왼쪽 문서 목록에서 확인하고 오른쪽의 비교 대상 또는 기준 영역으로 끌어다 놓으세요.
             </span>
           </div>
-          {targetDocuments.length === 0 ? (
-            <div className="empty-state compact-empty-state">
-              <strong>비교할 정책·지침이 없습니다.</strong>
-              <p>문서 목록에서 이 영역으로 끌어다 놓으세요.</p>
-            </div>
-          ) : (
-            <div className="list law-list">
-              {targetDocuments.map((document) => (
+          <div className="list law-list comparison-source-list">
+            {availableDocuments.map((document) => {
+              return (
                 <div
                   key={document.id}
-                  className={`list-item document-list-item ${getDocumentKindClassName(document.title)} selected`}
+                  className={`list-item document-list-item ${getDocumentKindClassName(document.title)}`}
                   draggable
                   onDragStart={(event) => handlePolicyDragStart(event, document.id)}
                   onDragEnd={handleDragCancel}
@@ -393,200 +309,376 @@ export function LawSourcePanel({
                       </div>
                       <span className="timestamp">{formatDocumentEffectiveDate(document)}</span>
                     </div>
-                    <button
-                      type="button"
-                      className="button ghost select-button"
-                      disabled={disabled}
-                      onClick={() => onRemoveTargetDocument(document.id)}
-                    >
-                      해제
-                    </button>
                   </div>
                 </div>
-              ))}
-            </div>
-          )}
-        </div>
-
-        <div
-          ref={lawDropZoneRef}
-          className={`comparison-drop-zone ${isReferenceDropActive ? "drop-target-active" : ""}`}
-          onDragEnter={(event) => {
-            if (disabled || (!hasPolicyDragPayload(event) && !hasLawDragPayload(event))) {
-              return;
-            }
-
-            event.preventDefault();
-            setIsReferenceDropActive(true);
-          }}
-          onDragOver={(event) => {
-            if (disabled || (!hasPolicyDragPayload(event) && !hasLawDragPayload(event))) {
-              return;
-            }
-
-            event.preventDefault();
-            event.dataTransfer.dropEffect = "copy";
-            if (!isReferenceDropActive) {
-              setIsReferenceDropActive(true);
-            }
-          }}
-          onDragLeave={(event) => {
-            if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
-              setIsReferenceDropActive(false);
-            }
-          }}
-          onDrop={(event) => {
-            if (hasPolicyDragPayload(event)) {
-              handleReferencePolicyDrop(event);
-              return;
-            }
-
-            handleLawDrop(event);
-          }}
-        >
-          <div className="selection-summary-card">
-            <div className="document-list-header">
-              <strong>기준 법률</strong>
-              <span className="document-title-prefix">{`${rightGroupCount}건 선택됨`}</span>
-            </div>
-            <span className="timestamp">
-              문서 목록과 아래 기준 법률 목록에서 이 영역으로 끌어다 놓으세요.
-            </span>
+              );
+            })}
           </div>
-          {referenceDocuments.length === 0 && selectedLawVersions.length === 0 ? (
-            <div className="empty-state compact-empty-state">
-              <strong>선택된 문서가 없습니다.</strong>
-              <p>문서 목록이나 아래 기준 법률 목록에서 이 영역으로 끌어다 놓으세요.</p>
+        </section>
+
+        <section className="comparison-target-frame">
+          <div className="section-header comparison-frame-header">
+            <h3>배치 프레임</h3>
+            <p>비교 대상과 기준을 나눠 배치하고 바로 검토를 실행합니다.</p>
+          </div>
+          <div className="info-card detail-card comparison-target-toolbar">
+            <strong>비교 플로우 안내</strong>
+            <ul className="plain-list">
+              <li>비교 대상에는 개정 여부를 검토할 정책·지침을 넣습니다.</li>
+              <li>기준에는 비교 기준이 되는 문서나 법령을 넣습니다.</li>
+              <li>법령은 아래 목록에서 끌어오거나, 이미 선택된 항목을 재파싱할 수 있습니다.</li>
+            </ul>
+          </div>
+
+          {comparisonBlockingReason ? (
+            <div className="warning-card detail-card comparison-target-toolbar">
+              <strong>지금은 비교를 수행할 수 없습니다.</strong>
+              <p className="helper-text detailed-empty-reason">{comparisonBlockingReason}</p>
             </div>
           ) : (
-            <div className="list law-list">
-              {referenceDocuments.map((document) => (
-                <div
-                  key={document.id}
-                  className={`list-item document-list-item ${getDocumentKindClassName(document.title)} selected`}
-                  draggable
-                  onDragStart={(event) => handlePolicyDragStart(event, document.id)}
-                  onDragEnd={handleDragCancel}
-                >
-                  <div className="list-item-row">
-                    <div className="stack list-item-copy">
-                      <div className="document-list-header">
-                        <strong>{document.title}</strong>
-                      </div>
-                      <span className="timestamp">{formatDocumentEffectiveDate(document)}</span>
-                    </div>
-                    <button
-                      type="button"
-                      className="button ghost select-button"
-                      disabled={disabled}
-                      onClick={() => onRemoveReferenceDocument(document.id)}
-                    >
-                      해제
-                    </button>
-                  </div>
-                </div>
-              ))}
-              {selectedLawVersions.map((lawVersion) => (
-                <div
-                  key={lawVersion.id}
-                  className="list-item selected"
-                  draggable
-                  onDragStart={(event) => handleLawDragStart(event, lawVersion.id)}
-                  onDragEnd={(event) => handleLawDragEnd(event)}
-                >
-                  <div className="list-item-row">
-                    <div className="stack list-item-copy">
-                      <div className="document-list-header">
-                        <strong>{lawVersion.source_title ?? "법령 원문"}</strong>
-                      </div>
-                      <span className="timestamp">{formatLawVersionMeta(lawVersion)}</span>
-                    </div>
-                    <button
-                      type="button"
-                      className="button ghost select-button"
-                      disabled={disabled}
-                      onClick={() => onRemoveLawVersion(lawVersion.id)}
-                    >
-                      해제
-                    </button>
-                    <button
-                      type="button"
-                      className="button ghost select-button"
-                      disabled={disabled || isMutatingLawVersionId === lawVersion.id}
-                      onClick={() => handleReparse(lawVersion.id)}
-                    >
-                      {isMutatingLawVersionId === lawVersion.id ? "처리 중..." : "재파싱"}
-                    </button>
-                    <button
-                      type="button"
-                      className="button ghost select-button"
-                      disabled={disabled || isMutatingLawVersionId === lawVersion.id}
-                      onClick={() => handleDelete(lawVersion.id)}
-                    >
-                      {isMutatingLawVersionId === lawVersion.id ? "삭제 중..." : "삭제"}
-                    </button>
-                  </div>
-                </div>
-              ))}
+            <div className="info-card detail-card comparison-target-toolbar">
+              <strong>실행 조건 충족</strong>
+              <p className="helper-text detailed-empty-reason">
+                좌우 그룹이 모두 준비되었습니다. 비교를 실행하면 하단 검토 패널에 경고와 권고가 함께 표시됩니다.
+              </p>
             </div>
           )}
-        </div>
-      </div>
 
-      {lawVersions.length > 0 ? (
-        <div className="stack">
-          <div className="info-card">
-            <strong className="law-count-label">{`등록된 기준 법률: ${lawVersions.length}건`}</strong>
-          </div>
-          <div className="list law-list">
-            {availableLawVersions.map((lawVersion) => (
-              <div
-                key={lawVersion.id}
-                className="list-item"
-                draggable
-                onDragStart={(event) => handleLawDragStart(event, lawVersion.id)}
-                onDragEnd={(event) => handleLawDragEnd(event)}
+          <div className="info-card detail-card favorite-toolbar comparison-target-toolbar">
+            <div className="favorite-toolbar-copy">
+              <strong>배치 즐겨찾기</strong>
+              <p className="helper-text">
+                현재 좌우 문서 배치와 기준 법률 선택을 이름으로 저장하고 다시 불러옵니다.
+              </p>
+            </div>
+            <div className="favorite-toolbar-controls">
+              <select
+                className="favorite-select"
+                value={selectedFavoriteId}
+                onChange={(event) => setSelectedFavoriteId(event.target.value)}
+                disabled={favorites.length === 0}
               >
-                <div className="list-item-row">
-                  <div className="stack list-item-copy">
-                    <div className="document-list-header">
-                      <strong>{lawVersion.source_title ?? "법령 원문"}</strong>
-                    </div>
-                    <span className="timestamp">{formatLawVersionMeta(lawVersion)}</span>
-                  </div>
-                  <button
-                    type="button"
-                    className="button ghost select-button"
-                    disabled={disabled || isMutatingLawVersionId === lawVersion.id}
-                    onClick={() => handleReparse(lawVersion.id)}
-                  >
-                    {isMutatingLawVersionId === lawVersion.id ? "처리 중..." : "재파싱"}
-                  </button>
-                </div>
-              </div>
-            ))}
+                <option value="">저장된 즐겨찾기 선택</option>
+                {favorites.map((favorite) => (
+                  <option key={favorite.id} value={favorite.id}>
+                    {favorite.name}
+                  </option>
+                ))}
+              </select>
+              <button type="button" className="button ghost select-button" onClick={onSaveFavorite}>
+                현재 배치 저장
+              </button>
+              <button
+                type="button"
+                className="button ghost select-button"
+                disabled={!selectedFavoriteId}
+                onClick={() => onApplyFavorite(selectedFavoriteId)}
+              >
+                불러오기
+              </button>
+              <button
+                type="button"
+                className="button ghost select-button"
+                disabled={!selectedFavoriteId}
+                onClick={() => onDeleteFavorite(selectedFavoriteId)}
+              >
+                삭제
+              </button>
+            </div>
           </div>
-        </div>
-      ) : null}
 
-      <div className="stack">
-        <button
-          className="button secondary comparison-run-button"
-          type="button"
-          disabled={
-            disabled ||
-            isComparing ||
-            targetDocuments.length === 0 ||
-            rightGroupCount === 0
-          }
-          onClick={handleRunComparison}
-        >
-          {isComparing ? "비교 실행 중..." : "좌우 그룹 비교 실행"}
-        </button>
-        <p className="helper-text">
-          {comparisonBlockingReason ??
-            "비교 실행 후에는 하단 패널에서 차이, 경고, AI 권고를 함께 검토할 수 있습니다."}
-        </p>
+          <div className="comparison-drop-grid">
+            <div
+            className={`comparison-drop-zone ${isTargetDropActive ? "drop-target-active" : ""}`}
+            onDragEnter={(event) => {
+              if (disabled || !hasPolicyDragPayload(event)) {
+                return;
+              }
+
+              event.preventDefault();
+              setIsTargetDropActive(true);
+            }}
+            onDragOver={(event) => {
+              if (disabled || !hasPolicyDragPayload(event)) {
+                return;
+              }
+
+              event.preventDefault();
+              event.dataTransfer.dropEffect = "copy";
+              if (!isTargetDropActive) {
+                setIsTargetDropActive(true);
+              }
+            }}
+            onDragLeave={(event) => {
+              if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+                setIsTargetDropActive(false);
+              }
+            }}
+            onDrop={handlePolicyDrop}
+          >
+            <div className="selection-summary-card">
+              <div className="document-list-header">
+                <strong>비교 대상</strong>
+                <span className="document-title-prefix">{`${targetDocuments.length}건 선택됨`}</span>
+              </div>
+              <span className="timestamp">
+                왼쪽 문서 목록에서 끌어다 놓아 개정 검토 대상을 구성합니다.
+              </span>
+            </div>
+            {targetDocuments.length === 0 ? (
+              <div className="empty-state compact-empty-state">
+                <strong>비교 대상 문서가 없습니다.</strong>
+                <p>왼쪽 문서 목록에서 이 영역으로 끌어다 놓으세요.</p>
+              </div>
+            ) : (
+              <div className="list law-list">
+                {targetDocuments.map((document) => (
+                  <div
+                    key={document.id}
+                    className={`list-item document-list-item ${getDocumentKindClassName(document.title)} selected`}
+                    draggable
+                    onDragStart={(event) => handlePolicyDragStart(event, document.id)}
+                    onDragEnd={handleDragCancel}
+                  >
+                    <div className="list-item-row">
+                      <div className="stack list-item-copy">
+                        <div className="document-list-header">
+                          <strong>{document.title}</strong>
+                        </div>
+                        <span className="timestamp">{formatDocumentEffectiveDate(document)}</span>
+                      </div>
+                      <button
+                        type="button"
+                        className="button action-dark select-button"
+                        disabled={disabled}
+                        onClick={() => onRemoveTargetDocument(document.id)}
+                      >
+                        해제
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+            <div
+            ref={lawDropZoneRef}
+            className={`comparison-drop-zone ${isReferenceDropActive ? "drop-target-active" : ""}`}
+            onDragEnter={(event) => {
+              if (disabled || (!hasPolicyDragPayload(event) && !hasLawDragPayload(event))) {
+                return;
+              }
+
+              event.preventDefault();
+              setIsReferenceDropActive(true);
+            }}
+            onDragOver={(event) => {
+              if (disabled || (!hasPolicyDragPayload(event) && !hasLawDragPayload(event))) {
+                return;
+              }
+
+              event.preventDefault();
+              event.dataTransfer.dropEffect = "copy";
+              if (!isReferenceDropActive) {
+                setIsReferenceDropActive(true);
+              }
+            }}
+            onDragLeave={(event) => {
+              if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+                setIsReferenceDropActive(false);
+              }
+            }}
+            onDrop={(event) => {
+              if (hasPolicyDragPayload(event)) {
+                handleReferencePolicyDrop(event);
+                return;
+              }
+
+              handleLawDrop(event);
+            }}
+          >
+            <div className="selection-summary-card">
+              <div className="document-list-header">
+                <strong>기준</strong>
+                <span className="document-title-prefix">{`${rightGroupCount}건 선택됨`}</span>
+              </div>
+              <span className="timestamp">
+                왼쪽 문서 목록과 아래 기준 법률 목록에서 이 영역으로 끌어다 놓으세요.
+              </span>
+            </div>
+            {referenceDocuments.length === 0 && selectedLawVersions.length === 0 ? (
+              <div className="empty-state compact-empty-state">
+                <strong>선택된 기준이 없습니다.</strong>
+                <p>왼쪽 문서 목록이나 아래 기준 법률 목록에서 이 영역으로 끌어다 놓으세요.</p>
+              </div>
+            ) : (
+              <div className="list law-list">
+                {referenceDocuments.map((document) => (
+                  <div
+                    key={document.id}
+                    className={`list-item document-list-item ${getDocumentKindClassName(document.title)} selected`}
+                    draggable
+                    onDragStart={(event) => handlePolicyDragStart(event, document.id)}
+                    onDragEnd={handleDragCancel}
+                  >
+                    <div className="list-item-row">
+                      <div className="stack list-item-copy">
+                        <div className="document-list-header">
+                          <strong>{document.title}</strong>
+                        </div>
+                        <span className="timestamp">{formatDocumentEffectiveDate(document)}</span>
+                      </div>
+                      <button
+                        type="button"
+                        className="button action-dark select-button"
+                        disabled={disabled}
+                        onClick={() => onRemoveReferenceDocument(document.id)}
+                      >
+                        해제
+                      </button>
+                    </div>
+                  </div>
+                ))}
+                {selectedLawVersions.map((lawVersion) => (
+                  <div
+                    key={lawVersion.id}
+                    className="list-item selected"
+                    draggable
+                    onDragStart={(event) => handleLawDragStart(event, lawVersion.id)}
+                    onDragEnd={(event) => handleLawDragEnd(event)}
+                  >
+                    <div className="list-item-row">
+                      <div className="stack list-item-copy">
+                        <div className="document-list-header">
+                          <strong>{lawVersion.source_title ?? "법령 원문"}</strong>
+                        </div>
+                        <span className="timestamp">{formatLawVersionMeta(lawVersion)}</span>
+                      </div>
+                      <button
+                        type="button"
+                        className="button action-dark select-button"
+                        disabled={disabled}
+                        onClick={() => onRemoveLawVersion(lawVersion.id)}
+                      >
+                        해제
+                      </button>
+                      <button
+                        type="button"
+                        className="button action-muted select-button"
+                        disabled={disabled || isMutatingLawVersionId === lawVersion.id}
+                        onClick={() => handleReparse(lawVersion.id)}
+                      >
+                        {isMutatingLawVersionId === lawVersion.id ? "처리 중..." : "재파싱"}
+                      </button>
+                      <button
+                        type="button"
+                        className="button action-dark select-button"
+                        disabled={disabled || isMutatingLawVersionId === lawVersion.id}
+                        onClick={() => handleDelete(lawVersion.id)}
+                      >
+                        {isMutatingLawVersionId === lawVersion.id ? "삭제 중..." : "삭제"}
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          </div>
+
+          {lawVersions.length > 0 ? (
+            <div className="stack comparison-law-bank">
+              <div className="info-card">
+                <strong className="law-count-label">{`등록된 기준 법률: ${lawVersions.length}건`}</strong>
+              </div>
+              <div className="list law-list">
+                {availableLawVersions.map((lawVersion) => (
+                  <div
+                    key={lawVersion.id}
+                    className="list-item"
+                    draggable
+                    onDragStart={(event) => handleLawDragStart(event, lawVersion.id)}
+                    onDragEnd={(event) => handleLawDragEnd(event)}
+                  >
+                    <div className="list-item-row">
+                      <div className="stack list-item-copy">
+                        <div className="document-list-header">
+                          <strong>{lawVersion.source_title ?? "법령 원문"}</strong>
+                        </div>
+                        <span className="timestamp">{formatLawVersionMeta(lawVersion)}</span>
+                      </div>
+                      <button
+                        type="button"
+                        className="button action-muted select-button"
+                        disabled={disabled || isMutatingLawVersionId === lawVersion.id}
+                        onClick={() => handleReparse(lawVersion.id)}
+                      >
+                        {isMutatingLawVersionId === lawVersion.id ? "처리 중..." : "재파싱"}
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
+
+          <div className="stack">
+            <button
+              className="button comparison-run-button"
+              type="button"
+              disabled={
+                disabled ||
+                isComparing ||
+                targetDocuments.length === 0 ||
+                rightGroupCount === 0
+              }
+              onClick={handleRunComparison}
+            >
+              {isComparing ? "검토 실행 중..." : "검토 실행"}
+            </button>
+            {comparisonBlockingReason ? (
+              <p className="helper-text">{comparisonBlockingReason}</p>
+            ) : null}
+            {overview ? (
+              <section className="comparison-review-overview comparison-overview-inline">
+                <article className="comparison-overview-card comparison-overview-card-summary">
+                  <span className="muted-label">현재 분석 범위</span>
+                  <p className="helper-text detailed-empty-reason">{overview.selectionSummary}</p>
+                </article>
+                <article className="comparison-overview-card comparison-overview-card-progress">
+                  <span className="muted-label">AI 단계 진행</span>
+                  <div className="comparison-stage-progress-list">
+                    {overview.stageProgress.steps.map((step) => (
+                      <div
+                        key={step.id}
+                        className={`comparison-stage-progress-item comparison-stage-progress-item-${step.status}`}
+                      >
+                        <div className="comparison-stage-progress-head">
+                          <strong>{`${step.label} (${step.percent}%)`}</strong>
+                        </div>
+                        <div className="comparison-stage-progress-track" aria-hidden="true">
+                          <div
+                            className="comparison-stage-progress-fill"
+                            style={{ width: `${step.percent}%` }}
+                          />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </article>
+                <article className="comparison-overview-card comparison-overview-card-usage">
+                  <span className="muted-label">OpenAI 호출</span>
+                  <strong>{overview.apiCallCount}건</strong>
+                  <p className="helper-text detailed-empty-reason">
+                    동시에 처리하지 않고 한 단계씩 순차 실행합니다.
+                  </p>
+                </article>
+              </section>
+            ) : null}
+          </div>
+        </section>
       </div>
     </div>
   );
@@ -602,10 +694,10 @@ function getComparisonBlockingReason(input: {
     return input.disabledReason ?? "현재 세션 또는 설정 상태 때문에 비교 기능이 잠겨 있습니다.";
   }
   if (input.targetCount === 0) {
-    return "좌측 그룹에 정책·지침이 없어 비교를 시작할 수 없습니다. 문서 목록에서 검토 대상을 먼저 드래그하세요.";
+    return "비교 대상에 정책·지침이 없어 비교를 시작할 수 없습니다. 문서 목록에서 검토 대상을 먼저 드래그하세요.";
   }
   if (input.rightGroupCount === 0) {
-    return "우측 그룹에 기준 문서나 법령이 없습니다. 비교 기준을 추가해야 차이 분석과 권고를 생성할 수 있습니다.";
+    return "기준에 기준 문서나 법령이 없습니다. 비교 기준을 추가해야 차이 분석과 권고를 생성할 수 있습니다.";
   }
   return null;
 }
@@ -652,4 +744,29 @@ function getDocumentKindClassName(title: string) {
   }
 
   return "document-kind-default";
+}
+
+function getDocumentAssignment(
+  documentId: string,
+  targetDocumentIds: string[],
+  referenceDocumentIds: string[],
+) {
+  if (targetDocumentIds.includes(documentId)) {
+    return {
+      label: "비교 대상",
+      className: "comparison-assignment-target",
+    };
+  }
+
+  if (referenceDocumentIds.includes(documentId)) {
+    return {
+      label: "기준",
+      className: "comparison-assignment-reference",
+    };
+  }
+
+  return {
+    label: "미배치",
+    className: "comparison-assignment-idle",
+  };
 }

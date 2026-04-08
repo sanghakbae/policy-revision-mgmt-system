@@ -102,55 +102,15 @@ export function DocumentViewer({ documentId, refreshKey = 0 }: DocumentViewerPro
 
   return (
     <div className="stack document-viewer">
-      <div className="section-header">
-        <h2>{document.title}</h2>
-        <p>
-          구조화된 장·조·항·호·목 섹션을 기준으로 문서를 검토합니다.
-        </p>
-      </div>
-
-      <div className="info-card">
-        <strong>문서 상태 요약</strong>
-        <ul className="plain-list">
-          <li>구조화 섹션 {document.sections.length}건</li>
-          <li>문서 유형 {currentDocument.document_type}</li>
-          <li>시행일 {currentDocument.metadata?.revisionDate ?? "미지정"}</li>
-        </ul>
-      </div>
-
-      <div className="info-card">
-        <span className="muted-label">구조화 섹션</span>
-        <div className="structured-editor-toolbar">
-          <button
-            type="button"
-            className="button ghost"
-            onClick={() => {
-              setIsEditing(true);
-              setStatus("구조화 섹션 편집 모드를 시작했습니다.");
-            }}
-            disabled={isEditing || isSaving}
-          >
-            편집
-          </button>
-          <button
-            type="button"
-            className="button"
-            onClick={handleSaveDraft}
-            disabled={!isEditing || isSaving}
-          >
-            {isSaving ? "저장 중..." : "저장"}
-          </button>
-          <button
-            type="button"
-            className="button ghost"
-            onClick={handleResetDraft}
-            disabled={!isEditing || isSaving}
-          >
-            취소
-          </button>
+      <div className="section-header inline-header">
+        <div>
+          <h2>{document.title}</h2>
+          <p>
+            구조화된 장·조·항·호·목 섹션을 기준으로 문서를 검토합니다.
+          </p>
         </div>
-        <div className="structured-metadata-editor">
-          <label className="structured-metadata-field">
+        <div className="structured-header-actions">
+          <label className="structured-metadata-field structured-metadata-field-inline">
             <span className="muted-label">시행일</span>
             {isEditing ? (
               <input
@@ -165,7 +125,40 @@ export function DocumentViewer({ documentId, refreshKey = 0 }: DocumentViewerPro
               <strong>{currentDocument.metadata?.revisionDate ?? "미지정"}</strong>
             )}
           </label>
+          <div className="structured-editor-toolbar">
+            <button
+              type="button"
+              className="button ghost structured-toolbar-button"
+              onClick={() => {
+                setIsEditing(true);
+                setStatus("구조화 섹션 편집 모드를 시작했습니다.");
+              }}
+              disabled={isEditing || isSaving}
+            >
+              편집
+            </button>
+            <button
+              type="button"
+              className="button structured-toolbar-button"
+              onClick={handleSaveDraft}
+              disabled={!isEditing || isSaving}
+            >
+              {isSaving ? "저장 중..." : "저장"}
+            </button>
+            <button
+              type="button"
+              className="button ghost structured-toolbar-button"
+              onClick={handleResetDraft}
+              disabled={!isEditing || isSaving}
+            >
+              취소
+            </button>
+          </div>
         </div>
+      </div>
+
+      <div className="info-card">
+        <span className="muted-label">구조화 섹션</span>
         <div className="structured-section-table-wrap">
           {(() => {
             const rows = draftRows;
@@ -195,6 +188,17 @@ export function DocumentViewer({ documentId, refreshKey = 0 }: DocumentViewerPro
                     <td className="structured-content-cell">
                       {isEditing ? (
                         <div className="structured-content-editor">
+                          <div className="structured-content-editor-header">
+                            <button
+                              type="button"
+                              className="button ghost structured-row-delete"
+                              onClick={() => {
+                                setDraftRows((current) => current.filter((entry) => entry.id !== row.id));
+                              }}
+                            >
+                              행 삭제
+                            </button>
+                          </div>
                           <textarea
                             value={row.content}
                             onChange={(event) => {
@@ -209,15 +213,6 @@ export function DocumentViewer({ documentId, refreshKey = 0 }: DocumentViewerPro
                             }}
                             rows={Math.max(2, row.content.split("\n").length)}
                           />
-                          <button
-                            type="button"
-                            className="button ghost structured-row-delete"
-                            onClick={() => {
-                              setDraftRows((current) => current.filter((entry) => entry.id !== row.id));
-                            }}
-                          >
-                            행 삭제
-                          </button>
                         </div>
                       ) : normalizeDisplayedSectionContent(row.content)}
                     </td>

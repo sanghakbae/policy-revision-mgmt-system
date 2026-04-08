@@ -1,10 +1,13 @@
 import mammoth from "mammoth";
 import {
+  clearSupabaseAuthStorage,
   getSupabaseClient,
+  normalizeSupabaseAuthError,
 } from "./supabaseClient";
 import type {
   AiRevisionGuidance,
   AiRevisionStageResult,
+  AiRevisionPromptOverrides,
   AggregatedComparisonResultRecord,
   AiRevisionAnalysisStage,
   ComparisonReviewAggregate,
@@ -870,6 +873,7 @@ export async function analyzeSelectedRevisionsStage(input: {
   lawVersionIds: string[];
   leftGroupReport?: unknown;
   rightGroupReport?: unknown;
+  promptOverrides?: Partial<AiRevisionPromptOverrides>;
 }): Promise<AiRevisionStageResult> {
   const session = await ensureAuthenticatedSession();
   const currentUser = await ensureAuthenticatedUser(session.access_token);
@@ -1127,19 +1131,53 @@ async function invokeEdgeFunction<TBody extends Record<string, unknown>>(
     userId?: string;
   },
 ) {
-  const session = await getFreshAuthenticatedSession();
-  let response = await invokeEdgeFunctionHttp(functionName, body, session.access_token);
+  let accessToken = await getValidatedAccessToken();
+  let response = await invokeEdgeFunctionHttp(functionName, body, accessToken);
 
   if (response.error && shouldRetryWithRefreshedSession(response.error)) {
-    const refreshedSession = await forceRefreshAuthenticatedSession();
-    response = await invokeEdgeFunctionHttp(functionName, body, refreshedSession.access_token);
+    accessToken = await getValidatedAccessToken(true);
+    response = await invokeEdgeFunctionHttp(functionName, body, accessToken);
   }
 
   if (response.error) {
+    if (shouldInvalidateStoredSession(response.error)) {
+      clearSupabaseAuthStorage();
+    }
     throw new Error(await formatFunctionInvokeError(response.error, contextInfo));
   }
 
   return response.data;
+}
+
+async function getValidatedAccessToken(forceRefresh = false) {
+  const supabase = getSupabaseClient();
+  const session = forceRefresh
+    ? await forceRefreshAuthenticatedSession()
+    : await getFreshAuthenticatedSession();
+
+  const validateAccessToken = async (token: string) => {
+    const {
+      data: { user },
+      error,
+    } = await supabase.auth.getUser(token);
+
+    if (error || !user) {
+      throw new Error(buildAuthDebugMessage(error?.message ?? "사용자 검증 실패", session));
+    }
+
+    return token;
+  };
+
+  try {
+    return await validateAccessToken(session.access_token);
+  } catch (error) {
+    if (!(error instanceof Error) || !isJwtError(error.message) || forceRefresh) {
+      throw error;
+    }
+
+    const refreshedSession = await forceRefreshAuthenticatedSession();
+    return await validateAccessToken(refreshedSession.access_token);
+  }
 }
 
 async function invokeEdgeFunctionHttp<TBody extends Record<string, unknown>>(
@@ -1455,15 +1493,18 @@ async function formatFunctionInvokeError(
     ? `HTTP ${error.context.status} ${error.context.statusText ?? ""}`.trim()
     : error.message || "함수 호출 중 오류가 발생했습니다.";
   const debugPrefix = buildDebugPrefix(statusMessage, contextInfo);
+  const authFailureSuffix = shouldInvalidateStoredSession(error)
+    ? `\n안내: ${normalizeSupabaseAuthError("jwt")} 방금 저장된 로컬 세션은 초기화했습니다. 다시 로그인한 뒤 검토를 다시 실행하세요.`
+    : "";
 
   if (!error.context) {
-    return debugPrefix;
+    return `${debugPrefix}${authFailureSuffix}`;
   }
 
   try {
     const payload = await error.context.json?.();
     if (payload) {
-      return `${debugPrefix}\n서버 응답: ${JSON.stringify(payload)}`;
+      return `${debugPrefix}\n서버 응답: ${JSON.stringify(payload)}${authFailureSuffix}`;
     }
   } catch {
     // Fall through to plain text extraction.
@@ -1472,13 +1513,13 @@ async function formatFunctionInvokeError(
   try {
     const text = await error.context.text?.();
     if (text) {
-      return `${debugPrefix}\n서버 응답: ${text}`;
+      return `${debugPrefix}\n서버 응답: ${text}${authFailureSuffix}`;
     }
   } catch {
     // Ignore and return the prefix only.
   }
 
-  return debugPrefix;
+  return `${debugPrefix}${authFailureSuffix}`;
 }
 
 function isJwtError(message?: string) {
@@ -1486,6 +1527,16 @@ function isJwtError(message?: string) {
 }
 
 function shouldRetryWithRefreshedSession(
+  error: Error & {
+    context?: {
+      status?: number;
+    };
+  },
+) {
+  return error.context?.status === 401 || isJwtError(error.message);
+}
+
+function shouldInvalidateStoredSession(
   error: Error & {
     context?: {
       status?: number;

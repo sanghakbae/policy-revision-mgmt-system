@@ -28,7 +28,7 @@ export function DocumentList({
   if (documents.length === 0) {
     return (
       <div className="empty-state">
-        <strong>등록된 문서가 없습니다.</strong>
+        <strong>문서 목록이 없습니다.</strong>
         <p>로그인 후 정책 또는 지침 문서를 업로드하세요.</p>
       </div>
     );
@@ -68,7 +68,7 @@ export function DocumentList({
             </div>
             <button
               type="button"
-              className="button ghost select-button"
+              className="button action-muted select-button"
               draggable={false}
               disabled={reparsingDocumentId === document.id}
               onMouseDown={(event) => {
@@ -86,7 +86,7 @@ export function DocumentList({
             </button>
             <button
               type="button"
-              className="button ghost select-button"
+              className="button action-dark select-button"
               draggable={false}
               disabled={deletingDocumentId === document.id}
               onMouseDown={(event) => {

@@ -1,12 +1,24 @@
 import { useEffect, useState } from "react";
 import { AuthPanel } from "./components/AuthPanel";
-import { ComparisonReviewPanel } from "./components/ComparisonReviewPanel";
+import {
+  ComparisonReviewPanel,
+  type ComparisonReviewAnalysisState,
+  getStageProgress,
+  type ComparisonReviewOverviewSnapshot,
+} from "./components/ComparisonReviewPanel";
 import { DocumentList } from "./components/DocumentList";
 import { DocumentUploadForm } from "./components/DocumentUploadForm";
 import { DocumentViewer } from "./components/DocumentViewer";
 import { LawSourcePanel } from "./components/LawSourcePanel";
 import { LawVersionPreview } from "./components/LawVersionPreview";
+import { PromptSettingsPanel } from "./components/PromptSettingsPanel";
 import {
+  COMPARISON_REPORT_INSTRUCTIONS,
+  LEFT_REPORT_INSTRUCTIONS,
+  RIGHT_REPORT_INSTRUCTIONS,
+} from "../shared/analysisPrompts";
+import {
+  analyzeSelectedRevisionsStage,
   deleteLawSource,
   deleteDocument,
   listComparisonRuns,
@@ -23,7 +35,12 @@ import {
   getSupabaseClient,
   hasSupabaseEnv,
 } from "./lib/supabaseClient";
-import type { ComparisonRunSummary, DocumentSummary, LawVersionSummary } from "./types";
+import type {
+  AiRevisionPromptOverrides,
+  ComparisonRunSummary,
+  DocumentSummary,
+  LawVersionSummary,
+} from "./types";
 import type { Session } from "@supabase/supabase-js";
 
 type NoticeTone = "info" | "success" | "warning" | "danger";
@@ -49,12 +66,21 @@ type AppNotice = {
   debug?: string[];
 };
 
-type ActivityLogEntry = AppNotice & {
-  id: string;
-  createdAt: string;
-};
+type WorkspaceSection = "documents" | "comparison" | "results" | "history" | "settings";
 
 export default function App() {
+  const emptyComparisonAnalysisState: ComparisonReviewAnalysisState = {
+    aiGuidance: null,
+    leftGroupReport: null,
+    rightGroupReport: null,
+    comparisonReport: null,
+    aiAnalysisError: null,
+    apiCallCount: 0,
+    isAnalyzingSelection: false,
+    analysisStageLabel: null,
+    analysisStagePhase: null,
+    analysisStageStartedAt: null,
+  };
   const [session, setSession] = useState<Session | null>(null);
   const [documents, setDocuments] = useState<DocumentSummary[]>([]);
   const [comparisonRuns, setComparisonRuns] = useState<ComparisonRunSummary[]>([]);
@@ -75,22 +101,24 @@ export default function App() {
   const [analysisRequestKey, setAnalysisRequestKey] = useState(0);
   const [documentPreviewRefreshKey, setDocumentPreviewRefreshKey] = useState(0);
   const [lawPreviewRefreshKey, setLawPreviewRefreshKey] = useState(0);
-  const [activityLog, setActivityLog] = useState<ActivityLogEntry[]>([]);
-  const [isSituationPanelOpen, setIsSituationPanelOpen] = useState(true);
   const [workspaceSelectionHydrated, setWorkspaceSelectionHydrated] = useState(false);
   const [workspaceFavorites, setWorkspaceFavorites] = useState<WorkspaceFavorite[]>([]);
+  const [activeWorkspaceSection, setActiveWorkspaceSection] = useState<WorkspaceSection>("documents");
+  const [appNotice, setAppNoticeState] = useState<AppNotice | null>(null);
+  const [comparisonOverview, setComparisonOverview] = useState<ComparisonReviewOverviewSnapshot | null>(null);
+  const [comparisonAnalysisState, setComparisonAnalysisState] = useState<ComparisonReviewAnalysisState>(
+    emptyComparisonAnalysisState,
+  );
+  const [promptOverrides, setPromptOverrides] = useState<AiRevisionPromptOverrides>({
+    left: LEFT_REPORT_INSTRUCTIONS,
+    right: RIGHT_REPORT_INSTRUCTIONS,
+    final: COMPARISON_REPORT_INSTRUCTIONS,
+  });
   const isSupabaseConfigured = hasSupabaseEnv();
   const sessionUserId = session?.user.id ?? null;
 
   function setAppNotice(nextNotice: AppNotice) {
-    setActivityLog((current) => [
-      {
-        ...nextNotice,
-        id: crypto.randomUUID(),
-        createdAt: new Date().toISOString(),
-      },
-      ...current,
-    ]);
+    setAppNoticeState(nextNotice);
   }
 
   function setStatus(message: string) {
@@ -330,18 +358,6 @@ export default function App() {
           current && comparisonItems.some((item) => item.id === current) ? current : null,
         );
         setWorkspaceSelectionHydrated(true);
-        setAppNotice({
-          tone: "success",
-          label: "작업 공간 준비",
-          title: `문서 ${documentItems.length}건, 법령 ${lawVersionItems.length}건, 비교 실행 ${comparisonItems.length}건을 불러왔습니다.`,
-          detail: "좌측에는 검토 대상 정책·지침, 우측에는 기준 문서와 법령을 구성할 수 있습니다.",
-          actions: getWorkspaceActions(documentItems.length, lawVersionItems.length),
-          debug: [
-            `documents=${documentItems.length}`,
-            `law_versions=${lawVersionItems.length}`,
-            `comparison_runs=${comparisonItems.length}`,
-          ],
-        });
       })
       .catch((error: Error) => {
         setAppNotice({
@@ -355,6 +371,181 @@ export default function App() {
       })
       .finally(() => undefined);
   }, [sessionUserId, isSupabaseConfigured, workspaceSelectionHydrated]);
+
+  useEffect(() => {
+    const hasSelectionContext =
+      comparisonTargetDocumentIds.length > 0 &&
+      (comparisonReferenceDocumentIds.length > 0 || selectedLawVersionIds.length > 0);
+
+    if (!hasSelectionContext) {
+      setComparisonAnalysisState(emptyComparisonAnalysisState);
+      return;
+    }
+
+    if (analysisRequestKey === 0) {
+      return;
+    }
+
+    let cancelled = false;
+
+    setComparisonAnalysisState({
+      ...emptyComparisonAnalysisState,
+      isAnalyzingSelection: true,
+      analysisStageLabel: "1단계 검토 비교 대상 정리 중",
+      analysisStagePhase: "left",
+      analysisStageStartedAt: Date.now(),
+    });
+
+    (async () => {
+      setStatus("1단계 검토 비교 대상 정리를 시작했습니다.");
+      const leftStage = await runComparisonStageWithTimeout(
+        "1단계 왼쪽 그룹 정리",
+        analyzeSelectedRevisionsStage({
+          stage: "left",
+          targetDocumentIds: comparisonTargetDocumentIds,
+          referenceDocumentIds: comparisonReferenceDocumentIds,
+          lawVersionIds: selectedLawVersionIds,
+          promptOverrides,
+        }),
+      );
+
+      if (cancelled) {
+        return;
+      }
+
+      setComparisonAnalysisState((current) => ({
+        ...current,
+        leftGroupReport: leftStage.left_group_report,
+        apiCallCount: leftStage.api_call_count,
+        analysisStageLabel: "2단계 기준 정리 중",
+        analysisStagePhase: "right",
+        analysisStageStartedAt: Date.now(),
+      }));
+
+      setStatus("2단계 기준 정리를 시작했습니다.");
+      const rightStage = await runComparisonStageWithTimeout(
+        "2단계 기준 정리",
+        analyzeSelectedRevisionsStage({
+          stage: "right",
+          targetDocumentIds: comparisonTargetDocumentIds,
+          referenceDocumentIds: comparisonReferenceDocumentIds,
+          lawVersionIds: selectedLawVersionIds,
+          promptOverrides,
+        }),
+      );
+
+      if (cancelled) {
+        return;
+      }
+
+      setComparisonAnalysisState((current) => ({
+        ...current,
+        rightGroupReport: rightStage.right_group_report,
+        apiCallCount: Math.max(current.apiCallCount, rightStage.api_call_count),
+        analysisStageLabel: "3단계 최종 비교 리포트 생성 중",
+        analysisStagePhase: "final",
+        analysisStageStartedAt: Date.now(),
+      }));
+
+      setStatus("3단계 최종 비교 리포트 생성을 시작했습니다.");
+      const finalStage = await runComparisonStageWithTimeout(
+        "3단계 최종 비교 리포트 생성",
+        analyzeSelectedRevisionsStage({
+          stage: "final",
+          targetDocumentIds: comparisonTargetDocumentIds,
+          referenceDocumentIds: comparisonReferenceDocumentIds,
+          lawVersionIds: selectedLawVersionIds,
+          leftGroupReport: leftStage.left_group_report,
+          rightGroupReport: rightStage.right_group_report,
+          promptOverrides,
+        }),
+      );
+
+      if (cancelled) {
+        return;
+      }
+
+      setComparisonAnalysisState({
+        aiGuidance: {
+          left_group_report: leftStage.left_group_report as NonNullable<typeof leftStage.left_group_report>,
+          right_group_report: rightStage.right_group_report as NonNullable<typeof rightStage.right_group_report>,
+          comparison_report: finalStage.comparison_report as NonNullable<typeof finalStage.comparison_report>,
+          model: finalStage.model,
+          api_call_count: finalStage.api_call_count,
+        },
+        leftGroupReport: leftStage.left_group_report,
+        rightGroupReport: rightStage.right_group_report,
+        comparisonReport: finalStage.comparison_report,
+        aiAnalysisError: null,
+        apiCallCount: finalStage.api_call_count,
+        isAnalyzingSelection: false,
+        analysisStageLabel: "3단계 리포트 생성 완료",
+        analysisStagePhase: "complete",
+        analysisStageStartedAt: Date.now(),
+      });
+      setStatus("3단계 최종 비교 리포트 생성이 완료되었습니다.");
+      setActiveWorkspaceSection("results");
+    })().catch((error: Error) => {
+      if (cancelled) {
+        return;
+      }
+
+      setComparisonAnalysisState({
+        ...emptyComparisonAnalysisState,
+        aiAnalysisError: error.message,
+      });
+      setStatus(error.message);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    analysisRequestKey,
+    comparisonReferenceDocumentIds,
+    comparisonTargetDocumentIds,
+    promptOverrides,
+    selectedLawVersionIds,
+  ]);
+
+  useEffect(() => {
+    const hasSelectionContext =
+      comparisonTargetDocumentIds.length > 0 &&
+      (comparisonReferenceDocumentIds.length > 0 || selectedLawVersionIds.length > 0);
+
+    if (!hasSelectionContext || analysisRequestKey === 0) {
+      setComparisonOverview(null);
+      return;
+    }
+
+    setComparisonOverview({
+      selectionSummary: `비교 대상 ${comparisonTargetDocumentIds.length}개, 기준 ${
+        comparisonReferenceDocumentIds.length + selectedLawVersionIds.length
+      }개가 현재 분석 범위에 포함되어 있습니다.`,
+      selectionCounts: {
+        leftDocumentCount: comparisonTargetDocumentIds.length,
+        rightDocumentCount: comparisonReferenceDocumentIds.length,
+        rightLawCount: selectedLawVersionIds.length,
+      },
+      apiCallCount: comparisonAnalysisState.apiCallCount,
+      stageProgress: getStageProgress({
+        leftGroupReport: comparisonAnalysisState.leftGroupReport,
+        rightGroupReport: comparisonAnalysisState.rightGroupReport,
+        comparisonReport: comparisonAnalysisState.comparisonReport,
+        isAnalyzingSelection: comparisonAnalysisState.isAnalyzingSelection,
+        analysisStageLabel: comparisonAnalysisState.analysisStageLabel,
+        analysisStagePhase: comparisonAnalysisState.analysisStagePhase,
+        analysisStageStartedAt: comparisonAnalysisState.analysisStageStartedAt,
+        now: Date.now(),
+      }),
+    });
+  }, [
+    analysisRequestKey,
+    comparisonAnalysisState,
+    comparisonReferenceDocumentIds.length,
+    comparisonTargetDocumentIds.length,
+    selectedLawVersionIds.length,
+  ]);
 
   useEffect(() => {
     if (!sessionUserId || !workspaceSelectionHydrated) {
@@ -611,7 +802,7 @@ export default function App() {
         tone: "success",
         label: "법령 정리",
         title: "법령 삭제가 완료되었습니다.",
-        detail: "우측 그룹과 등록된 법령 목록을 새로 고쳤습니다.",
+        detail: "기준과 등록된 법령 목록을 새로 고쳤습니다.",
         debug: [`law_versions=${lawVersionItems.length}`],
       });
     } catch (error) {
@@ -678,8 +869,8 @@ export default function App() {
         tone: "warning",
         label: "비교 실행 차단",
         title: "비교할 정책 또는 지침을 선택하세요.",
-        detail: "좌측 그룹이 비어 있으면 비교를 시작할 수 없습니다.",
-        actions: ["문서 목록에서 문서를 좌측 그룹으로 드래그하세요."],
+        detail: "비교 대상이 비어 있으면 비교를 시작할 수 없습니다.",
+        actions: ["문서 목록에서 문서를 비교 대상으로 드래그하세요."],
         debug: ["comparison blocked target_count=0"],
       });
       return;
@@ -689,22 +880,36 @@ export default function App() {
       setAppNotice({
         tone: "warning",
         label: "비교 실행 차단",
-        title: "우측 그룹에 비교 기준 문서 또는 기준 법률을 선택하세요.",
+        title: "기준에 비교 기준 문서 또는 기준 법률을 선택하세요.",
         detail: "비교 기준이 없으면 차이 분석과 AI 권고를 만들 수 없습니다.",
-        actions: ["문서를 우측 그룹으로 드래그하거나 등록된 법령을 추가하세요."],
+        actions: ["문서를 기준으로 드래그하거나 등록된 법령을 추가하세요."],
         debug: ["comparison blocked reference_count=0", "comparison blocked law_count=0"],
       });
       return;
     }
 
+    setAppNotice({
+      tone: "info",
+      label: "검토 실행 시작",
+      title: "검토 실행을 시작했습니다.",
+      detail: `${selectedDocuments.length}개 비교 대상과 ${selectedReferenceDocuments.length + selectedLawVersionIds.length}개 기준으로 분석을 준비 중입니다.`,
+      actions: ["하단 진행 박스에서 현재 분석 범위와 단계 진행 상태를 확인하세요."],
+      debug: [
+        `target_count=${selectedDocuments.length}`,
+        `reference_count=${selectedReferenceDocuments.length}`,
+        `law_count=${selectedLawVersionIds.length}`,
+        "ai_analysis_requested=true",
+      ],
+    });
+
     if (selectedLawVersionIds.length === 0) {
       setAnalysisRequestKey((current) => current + 1);
       setAppNotice({
-        tone: "success",
-        label: "비교 준비 완료",
-        title: `좌측 정책·지침 ${selectedDocuments.length}건과 우측 기준 문서 ${selectedReferenceDocuments.length}건의 AI 비교 검토를 생성했습니다.`,
-        detail: "법령 없이도 문서 간 갭 분석은 가능합니다.",
-        actions: ["우측 패널의 AI 비교 결과를 검토하세요.", "법령 기반 비교가 필요하면 기준 법률을 추가하세요."],
+        tone: "info",
+        label: "검토 실행 중",
+        title: `좌측 정책·지침 ${selectedDocuments.length}건과 우측 기준 문서 ${selectedReferenceDocuments.length}건의 AI 검토를 진행 중입니다.`,
+        detail: "법령 없이 문서 간 갭 분석만 순차 실행합니다.",
+        actions: ["하단 진행 박스에서 1단계, 2단계, 3단계 진행 상태를 확인하세요."],
         debug: [`target_count=${selectedDocuments.length}`, `reference_count=${selectedReferenceDocuments.length}`, "law_count=0"],
       });
       return;
@@ -821,7 +1026,7 @@ export default function App() {
       tone: "info",
       label: "그룹 이동",
       title: "문서를 비교 대상 그룹으로 이동했습니다.",
-      detail: document ? document.title : "선택한 문서를 좌측 그룹에 배치했습니다.",
+      detail: document ? document.title : "선택한 문서를 비교 대상에 배치했습니다.",
       debug: [`document_id=${documentId}`, "group=target"],
     });
   }
@@ -1001,202 +1206,330 @@ export default function App() {
       ...comparisonReferenceDocumentIds,
     ]),
   );
-  const visibleDocuments = documents.filter(
-    (document) =>
-      !comparisonTargetDocumentIds.includes(document.id) &&
-      !comparisonReferenceDocumentIds.includes(document.id),
-  );
+  const workspaceNavigationItems: {
+    id: WorkspaceSection;
+    label: string;
+  }[] = [
+    {
+      id: "documents",
+      label: "문서 관리",
+    },
+    {
+      id: "comparison",
+      label: "비교덱 구성",
+    },
+    {
+      id: "results",
+      label: "검토 결과",
+    },
+    {
+      id: "history",
+      label: "이력 관리",
+    },
+    {
+      id: "settings",
+      label: "설정",
+    },
+  ];
+  const activeWorkspaceMeta = getWorkspaceSectionMeta(activeWorkspaceSection);
+  const showWorkspaceNavigation = Boolean(session) && isSupabaseConfigured;
+  const headerStatus = appNotice ?? {
+    tone: "info" as const,
+    label: "상태",
+    title: "대기 중",
+    detail: "현재 실행 중인 작업이 없습니다.",
+  };
 
   return (
     <div className="app-shell">
-      <div className={`app-frame ${isSituationPanelOpen ? "situation-open" : "situation-collapsed"}`}>
+      <div className="app-frame">
         <div className="app-main-column">
-          <header className="hero">
-            <div className="hero-main">
-              <p className="eyebrow">법적 준거성 검토 환경</p>
-              <h1 className="hero-title-single-line">법적 준거성 검토 시스템</h1>
-              <p className="hero-copy">
-                정책·지침 문서와 기준 법률을 한 화면에서 등록하고 비교하며, 결과와 이력을 계속 추적합니다.
-              </p>
-            </div>
-          </header>
-
-          <main className="workspace-stack">
-            {!isSupabaseConfigured ? (
-              <section className="panel">
-                <div className="warning-card">
-                  <strong>Supabase 설정이 필요합니다</strong>
-                  <p>
-                    `.env.example`를 기준으로 `.env`를 만든 뒤
-                    `VITE_SUPABASE_URL`과 `VITE_SUPABASE_ANON_KEY`를 설정하세요.
-                  </p>
-                  <p className="helper-text">
-                    지금은 화면만 로컬에서 보이는 상태이며, 해당 값이 없으면
-                    인증, 업로드, 비교, 권고 기능은 비활성화됩니다.
-                  </p>
+          <div className={`workspace-shell ${showWorkspaceNavigation ? "" : "no-sidebar"}`.trim()}>
+            {showWorkspaceNavigation ? (
+              <aside className="workspace-sidebar" aria-label="작업 탐색">
+                <div className="workspace-sidebar-title">
+                  <strong>준거성 검토 시스템</strong>
                 </div>
-              </section>
+                <nav className="workspace-nav">
+                  {workspaceNavigationItems.map((item) => (
+                    <button
+                      key={item.id}
+                      type="button"
+                      className={`workspace-nav-item ${activeWorkspaceSection === item.id ? "is-active" : ""}`}
+                      onClick={() => {
+                        setActiveWorkspaceSection(item.id);
+                        if (item.id === "documents") {
+                          setSelectedDocumentId(documents[0]?.id ?? null);
+                        }
+                      }}
+                    >
+                      <strong>{item.label}</strong>
+                    </button>
+                  ))}
+                </nav>
+              </aside>
             ) : null}
 
-            <div className="layout-grid">
-              <div className="layout-grid-left">
-                <section className="panel panel-equal-height">
-                  <AuthPanel session={session} />
-                  <DocumentUploadForm
-                    disabled={!session || !isSupabaseConfigured}
-                    onUpload={handleUpload}
-                    setStatus={setStatus}
-                    disabledReason={getUploadDisabledReason(session, isSupabaseConfigured)}
-                  />
-                </section>
-
-                <section className="panel panel-sticky panel-equal-height">
-                  <div className="section-header">
-                    <h2>정책, 지침, 법률, 시행령, 시행규칙 등록</h2>
-                    <p>현재 사용자 기준으로 등록된 정책, 지침, 법률, 시행령, 시행규칙 문서를 보여줍니다.</p>
+            <div className="workspace-content">
+              <div className="workspace-hero-row">
+                <header
+                  className={`hero ${activeWorkspaceSection === "documents" ? "hero-documents" : ""}`.trim()}
+                >
+                  <div
+                    className={`hero-main ${activeWorkspaceSection === "documents" ? "hero-main-documents" : ""}`.trim()}
+                  >
+                    <p
+                      className={`eyebrow ${activeWorkspaceSection === "documents" ? "hero-documents-eyebrow" : ""}`.trim()}
+                    >
+                      {showWorkspaceNavigation ? activeWorkspaceMeta.kicker : "로그인"}
+                    </p>
+                    <h1
+                      className={`hero-title-single-line ${activeWorkspaceSection === "documents" ? "hero-documents-title" : ""}`.trim()}
+                    >
+                      {showWorkspaceNavigation ? activeWorkspaceMeta.title : "로그인"}
+                    </h1>
+                    <p
+                      className={`hero-copy ${activeWorkspaceSection === "documents" ? "hero-documents-copy" : ""}`.trim()}
+                    >
+                      {showWorkspaceNavigation
+                        ? activeWorkspaceMeta.description
+                        : "로그인 화면을 별도 페이지로 분리했습니다. 인증 후 문서 관리 화면으로 이동합니다."}
+                    </p>
                   </div>
-                  <DocumentList
-                    documents={visibleDocuments}
-                    selectedId={selectedDocumentId}
-                    checkedIds={highlightedDocumentIds}
-                    onSelect={handleSelectDocument}
-                    onDragDocumentStart={setDraggingDocumentId}
-                    onDragDocumentEnd={() => setDraggingDocumentId(null)}
-                    onDelete={handleDeleteDocument}
-                    onReparse={handleReparseDocument}
-                    deletingDocumentId={deletingDocumentId}
-                    reparsingDocumentId={reparsingDocumentId}
-                  />
-                </section>
+                </header>
+                <aside className="workspace-status-side">
+                  <section className="workspace-status-box" aria-label="상태">
+                    <span className="workspace-status-box-label">{headerStatus.label}</span>
+                    <strong>{headerStatus.title}</strong>
+                    {headerStatus.detail ? <p>{headerStatus.detail}</p> : null}
+                  </section>
+                </aside>
               </div>
 
-              <section className="panel panel-equal-height">
-                <div className="section-header">
-                  <h2>비교 검토 설정</h2>
-                  <p>왼쪽의 비교 대상 정책·지침 그룹과 오른쪽의 기준 법률 그룹을 비교합니다.</p>
-                </div>
-                <LawSourcePanel
-                  documents={documents}
-                  targetDocumentIds={comparisonTargetDocumentIds}
-                  referenceDocumentIds={comparisonReferenceDocumentIds}
-                  draggingDocumentId={draggingDocumentId}
-                  lawVersions={lawVersions}
-                  selectedLawVersionIds={selectedLawVersionIds}
-                  disabled={!session || !isSupabaseConfigured}
-                  onAddLawVersion={handleAddLawVersion}
-                  onRemoveLawVersion={handleRemoveLawVersion}
-                  onDropTargetDocument={handleDropTargetDocument}
-                  onRemoveTargetDocument={handleRemoveTargetDocument}
-                  onDropReferenceDocument={handleDropReferenceDocument}
-                  onRemoveReferenceDocument={handleRemoveReferenceDocument}
-                  onDeleteLawSource={handleDeleteLawSource}
-                  onReparseLawSource={handleReparseLawSource}
-                  onRunComparison={handleRunComparison}
-                  favorites={workspaceFavorites.map((item) => ({
-                    id: item.id,
-                    name: item.name,
-                    updatedAt: item.updatedAt,
-                  }))}
-                  activeFavoriteId={
-                    workspaceFavorites.find((item) =>
-                      isSameWorkspaceSelection(
-                        item.selection,
-                        createWorkspaceSelectionSnapshot({
-                          selectedDocumentId,
-                          targetDocumentIds: comparisonTargetDocumentIds,
-                          referenceDocumentIds: comparisonReferenceDocumentIds,
-                          lawVersionIds: selectedLawVersionIds,
-                        }),
-                      ),
-                    )?.id ?? null
-                  }
-                  onSaveFavorite={handleSaveWorkspaceFavorite}
-                  onApplyFavorite={handleApplyWorkspaceFavorite}
-                  onDeleteFavorite={handleDeleteWorkspaceFavorite}
-                  disabledReason={getComparisonDisabledReason(session, isSupabaseConfigured)}
-                />
-                <LawVersionPreview
-                  lawVersionId={selectedLawVersionIds[0] ?? null}
-                  refreshKey={lawPreviewRefreshKey}
-                />
-              </section>
-            </div>
-
-            <div className="review-shell">
-              <section className="panel panel-wide">
-                <DocumentViewer
-                  documentId={selectedDocumentId}
-                  refreshKey={documentPreviewRefreshKey}
-                />
-              </section>
-              <section className="panel panel-wide">
-                <ComparisonReviewPanel
-                  comparisonRunId={selectedComparisonRunId}
-                  comparisonRunIds={activeComparisonRunIds}
-                  selectedDocumentIds={comparisonTargetDocumentIds}
-                  referenceDocumentIds={comparisonReferenceDocumentIds}
-                  selectedLawVersionIds={selectedLawVersionIds}
-                  analysisRequestKey={analysisRequestKey}
-                  setStatus={setStatus}
-                />
-              </section>
-            </div>
-          </main>
-        </div>
-
-        <aside className={`situation-panel situation-panel-sidebar ${isSituationPanelOpen ? "" : "is-collapsed"}`} aria-label="우측 상단 상황판">
-          <button
-            type="button"
-            className="situation-toggle"
-            onClick={() => {
-              setIsSituationPanelOpen((current) => !current);
-            }}
-          >
-            {isSituationPanelOpen ? "로그 접기" : "로그 열기"}
-          </button>
-          {isSituationPanelOpen ? (
-          <div className="situation-log">
-            {activityLog.map((entry) => (
-              <article key={entry.id} className={`situation-log-entry ${entry.tone}`}>
-                <div className="situation-log-meta">
-                  <span>{entry.label}</span>
-                  <time dateTime={entry.createdAt}>{formatActivityTimestamp(entry.createdAt)}</time>
-                </div>
-                <strong>{entry.title}</strong>
-                {entry.detail ? <p>{entry.detail}</p> : null}
-                {entry.actions?.length ? (
-                  <ul className="situation-list">
-                    {entry.actions.map((action) => (
-                      <li key={`${entry.id}-${action}`}>{action}</li>
-                    ))}
-                  </ul>
+              <main className="workspace-stack">
+                {!isSupabaseConfigured ? (
+                  <section className="panel">
+                    <div className="warning-card">
+                      <strong>Supabase 설정이 필요합니다</strong>
+                      <p>
+                        `.env.example`를 기준으로 `.env`를 만든 뒤
+                        `VITE_SUPABASE_URL`과 `VITE_SUPABASE_ANON_KEY`를 설정하세요.
+                      </p>
+                      <p className="helper-text">
+                        지금은 화면만 로컬에서 보이는 상태이며, 해당 값이 없으면
+                        인증, 업로드, 비교, 권고 기능은 비활성화됩니다.
+                      </p>
+                    </div>
+                  </section>
                 ) : null}
-                {entry.debug?.length ? (
-                  <div className="situation-debug">
-                    {entry.debug.map((line) => (
-                      <code key={`${entry.id}-${line}`}>{line}</code>
-                    ))}
+
+                {!showWorkspaceNavigation ? (
+                  <section className="panel panel-equal-height workspace-body-card workspace-login-page">
+                    <div className="workspace-login-layout">
+                      <div className="workspace-login-copy">
+                        <p className="workspace-login-kicker">Policy Revision Mgmt</p>
+                        <h2>준거성 검토 시스템 로그인</h2>
+                        <p>
+                          정책 문서 등록, 비교덱 구성, 단계별 AI 검토 결과 확인까지 한 화면에서 처리합니다.
+                        </p>
+                        <div className="workspace-login-feature-list">
+                          <div className="workspace-login-feature">
+                            <strong>문서 관리</strong>
+                            <p>등록된 정책·지침 문서를 구조화 섹션 기준으로 바로 검토합니다.</p>
+                          </div>
+                          <div className="workspace-login-feature">
+                            <strong>비교덱 구성</strong>
+                            <p>비교 대상, 기준 문서, 기준 법령을 배치해 검토 실행 조건을 맞춥니다.</p>
+                          </div>
+                          <div className="workspace-login-feature">
+                            <strong>검토 결과</strong>
+                            <p>1, 2, 3단계 AI 리포트와 비교 결과를 프레임 단위로 확인합니다.</p>
+                          </div>
+                        </div>
+                      </div>
+                      <AuthPanel session={session} />
+                    </div>
+                  </section>
+                ) : null}
+
+                {activeWorkspaceSection === "documents" ? (
+                  <div className="review-shell workspace-documents-layout">
+                    <div className="workspace-documents-column">
+                      <section className="panel workspace-body-card workspace-documents-panel">
+                        <div className="section-header workspace-section-header">
+                          <h2>문서 목록</h2>
+                          <p>문서 목록에서 선택한 문서를 오른쪽에서 구조와 본문으로 바로 검토할 수 있습니다.</p>
+                        </div>
+                        <DocumentList
+                          documents={documents}
+                          selectedId={selectedDocumentId}
+                          checkedIds={highlightedDocumentIds}
+                          onSelect={handleSelectDocument}
+                          onDragDocumentStart={setDraggingDocumentId}
+                          onDragDocumentEnd={() => setDraggingDocumentId(null)}
+                          onDelete={handleDeleteDocument}
+                          onReparse={handleReparseDocument}
+                          deletingDocumentId={deletingDocumentId}
+                          reparsingDocumentId={reparsingDocumentId}
+                        />
+                      </section>
+                      <section className="panel workspace-documents-upload-panel">
+                        <div className="section-header workspace-section-header">
+                          <h2>정책·지침 업로드</h2>
+                          <p>새 문서를 등록하고 구조화 섹션을 생성합니다.</p>
+                        </div>
+                        <DocumentUploadForm
+                          disabled={!session || !isSupabaseConfigured}
+                          onUpload={handleUpload}
+                          setStatus={setStatus}
+                          disabledReason={getUploadDisabledReason(session, isSupabaseConfigured)}
+                        />
+                      </section>
+                    </div>
+                    <section className="panel panel-wide workspace-body-card workspace-document-viewer-panel">
+                      <div className="section-header workspace-section-header">
+                        <h2>문서 보기</h2>
+                        <p>선택한 문서의 구조화 섹션과 세부 내용을 바로 확인합니다.</p>
+                      </div>
+                      <DocumentViewer
+                        documentId={selectedDocumentId}
+                        refreshKey={documentPreviewRefreshKey}
+                      />
+                    </section>
                   </div>
                 ) : null}
-              </article>
-            ))}
+
+                {activeWorkspaceSection === "comparison" ? (
+                  <section
+                    className={`workspace-body-plain workspace-comparison-layout ${selectedLawVersionIds[0] ? "has-law-preview" : "no-law-preview"}`.trim()}
+                  >
+                    <div className="workspace-comparison-main">
+                      <LawSourcePanel
+                        documents={documents}
+                        targetDocumentIds={comparisonTargetDocumentIds}
+                        referenceDocumentIds={comparisonReferenceDocumentIds}
+                        draggingDocumentId={draggingDocumentId}
+                        lawVersions={lawVersions}
+                        selectedLawVersionIds={selectedLawVersionIds}
+                        disabled={!session || !isSupabaseConfigured}
+                        onAddLawVersion={handleAddLawVersion}
+                        onRemoveLawVersion={handleRemoveLawVersion}
+                        onDropTargetDocument={handleDropTargetDocument}
+                        onRemoveTargetDocument={handleRemoveTargetDocument}
+                        onDropReferenceDocument={handleDropReferenceDocument}
+                        onRemoveReferenceDocument={handleRemoveReferenceDocument}
+                        onDeleteLawSource={handleDeleteLawSource}
+                        onReparseLawSource={handleReparseLawSource}
+                        onRunComparison={handleRunComparison}
+                        favorites={workspaceFavorites.map((item) => ({
+                          id: item.id,
+                          name: item.name,
+                          updatedAt: item.updatedAt,
+                        }))}
+                        activeFavoriteId={
+                          workspaceFavorites.find((item) =>
+                            isSameWorkspaceSelection(
+                              item.selection,
+                              createWorkspaceSelectionSnapshot({
+                                selectedDocumentId,
+                                targetDocumentIds: comparisonTargetDocumentIds,
+                                referenceDocumentIds: comparisonReferenceDocumentIds,
+                                lawVersionIds: selectedLawVersionIds,
+                              }),
+                            ),
+                          )?.id ?? null
+                        }
+                        onSaveFavorite={handleSaveWorkspaceFavorite}
+                        onApplyFavorite={handleApplyWorkspaceFavorite}
+                        onDeleteFavorite={handleDeleteWorkspaceFavorite}
+                        disabledReason={getComparisonDisabledReason(session, isSupabaseConfigured)}
+                        overview={comparisonOverview}
+                      />
+                    </div>
+                    {selectedLawVersionIds[0] ? (
+                      <aside className="workspace-comparison-side">
+                        <LawVersionPreview
+                          lawVersionId={selectedLawVersionIds[0] ?? null}
+                          refreshKey={lawPreviewRefreshKey}
+                        />
+                      </aside>
+                    ) : null}
+                  </section>
+                ) : null}
+
+                {activeWorkspaceSection === "results" ? (
+                  <section className="workspace-body-plain workspace-results-body">
+                    <ComparisonReviewPanel
+                      comparisonRunId={selectedComparisonRunId}
+                      comparisonRunIds={activeComparisonRunIds}
+                      selectedDocumentIds={comparisonTargetDocumentIds}
+                      referenceDocumentIds={comparisonReferenceDocumentIds}
+                      selectedLawVersionIds={selectedLawVersionIds}
+                      historyStorageKey={
+                        sessionUserId ? `policy-revision-mgmt-ai-analysis-history:${sessionUserId}` : undefined
+                      }
+                      viewMode="results"
+                      setStatus={setStatus}
+                      onOverviewChange={setComparisonOverview}
+                      analysisState={comparisonAnalysisState}
+                    />
+                  </section>
+                ) : null}
+
+                {activeWorkspaceSection === "history" ? (
+                  <section className="panel panel-wide workspace-body-card">
+                    <div className="section-header workspace-section-header">
+                      <h2>이력 관리</h2>
+                      <p>저장된 검토 결과 이력을 확인하고 다시 불러오거나 삭제합니다.</p>
+                    </div>
+                    <ComparisonReviewPanel
+                      comparisonRunId={selectedComparisonRunId}
+                      comparisonRunIds={activeComparisonRunIds}
+                      selectedDocumentIds={comparisonTargetDocumentIds}
+                      referenceDocumentIds={comparisonReferenceDocumentIds}
+                      selectedLawVersionIds={selectedLawVersionIds}
+                      historyStorageKey={
+                        sessionUserId ? `policy-revision-mgmt-ai-analysis-history:${sessionUserId}` : undefined
+                      }
+                      viewMode="history"
+                      setStatus={setStatus}
+                      onOverviewChange={setComparisonOverview}
+                      analysisState={comparisonAnalysisState}
+                    />
+                  </section>
+                ) : null}
+
+                {activeWorkspaceSection === "settings" ? (
+                  <section className="workspace-body-plain workspace-results-body">
+                    <PromptSettingsPanel
+                      promptOverrides={promptOverrides}
+                      onPromptChange={(stage, value) => {
+                        setPromptOverrides((current) => ({
+                          ...current,
+                          [stage]: value,
+                        }));
+                      }}
+                      onPromptReset={(stage) => {
+                        setPromptOverrides((current) => ({
+                          ...current,
+                          [stage]:
+                            stage === "left"
+                              ? LEFT_REPORT_INSTRUCTIONS
+                              : stage === "right"
+                                ? RIGHT_REPORT_INSTRUCTIONS
+                                : COMPARISON_REPORT_INSTRUCTIONS,
+                        }));
+                      }}
+                    />
+                  </section>
+                ) : null}
+              </main>
+            </div>
           </div>
-          ) : null}
-        </aside>
+        </div>
       </div>
     </div>
   );
-}
-
-function formatActivityTimestamp(value: string) {
-  return new Date(value).toLocaleString("ko-KR", {
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false,
-  });
 }
 
 function inferNoticeTone(message: string): NoticeTone {
@@ -1402,7 +1735,47 @@ function getWorkspaceActions(documentCount: number, lawCount: number) {
   if (lawCount === 0) {
     return ["법령을 추가하지 않았다면 우선 문서 간 비교부터 진행할 수 있습니다.", "법령 기반 비교가 필요하면 기준 법령을 등록하거나 선택하세요."];
   }
-  return ["좌측과 우측 그룹을 구성한 뒤 비교를 실행하세요."];
+  return ["비교 대상과 기준을 구성한 뒤 비교를 실행하세요."];
+}
+
+function getWorkspaceSectionMeta(section: WorkspaceSection) {
+  if (section === "documents") {
+    return {
+      kicker: "문서 관리",
+      title: "문서 관리",
+      description: "문서 목록을 관리하고, 선택한 문서를 오른쪽에서 바로 검토합니다.",
+    };
+  }
+
+  if (section === "comparison") {
+    return {
+      kicker: "비교덱 구성",
+      title: "비교덱 구성",
+      description: "비교 대상과 기준 문서, 기준 법률을 한 화면에서 배치하고 실행합니다.",
+    };
+  }
+
+  if (section === "settings") {
+    return {
+      kicker: "설정",
+      title: "설정",
+      description: "단계별 프롬프트와 검토 실행 기본 설정을 관리합니다.",
+    };
+  }
+
+  if (section === "history") {
+    return {
+      kicker: "이력 관리",
+      title: "이력 관리",
+      description: "저장된 검토 결과 이력을 확인하고 다시 불러오거나 삭제합니다.",
+    };
+  }
+
+  return {
+    kicker: "검토 결과",
+    title: "검토 결과",
+    description: "1단계, 2단계, 3단계 결과를 프레임 단위로 검토합니다.",
+  };
 }
 
 function getUploadDisabledReason(session: Session | null, isSupabaseConfigured: boolean) {
@@ -1423,6 +1796,19 @@ function getComparisonDisabledReason(session: Session | null, isSupabaseConfigur
     return "로그인 후에만 비교 실행과 법령 변경 작업을 수행할 수 있습니다.";
   }
   return null;
+}
+
+const APP_STAGE_REQUEST_TIMEOUT_MS = 190_000;
+
+function runComparisonStageWithTimeout<T>(label: string, promise: Promise<T>) {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) => {
+      window.setTimeout(() => {
+        reject(new Error(`${label} 응답이 ${Math.round(APP_STAGE_REQUEST_TIMEOUT_MS / 1000)}초를 넘겨 지연되고 있습니다.`));
+      }, APP_STAGE_REQUEST_TIMEOUT_MS);
+    }),
+  ]);
 }
 
 function createDeleteConfirmationCode() {
