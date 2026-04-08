@@ -50,7 +50,7 @@ interface ParserState {
 type StructuredHierarchyType = Exclude<HierarchyType, "document">;
 
 const CHAPTER_PATTERN = /^제\s*([0-9]+)\s*장(?:\s+(.+))?$/u;
-const ARTICLE_PATTERN = /^제\s*([0-9]+(?:의[0-9]+)?)\s*조(?:\s*\((.+)\))?$/u;
+const ARTICLE_PATTERN = /^제\s*([0-9]+(?:의[0-9]+)?)\s*조(?:\s*\((.+?)\))?(?=\s|$)/u;
 const CIRCLED_PARAGRAPH_PATTERN = /^([①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳])\s*(.+)$/u;
 const DECIMAL_PATTERN = /^([0-9]+)\.\s*(.+)$/u;
 const PAREN_ITEM_PATTERN = /^([0-9]+)\)\s*(.+)$/u;
@@ -61,7 +61,7 @@ export function normalizeText(value: string) {
 }
 
 export function parsePolicyText(rawText: string): ParseResult {
-  const rawLines = splitIntoLogicalLines(rawText);
+  const rawLines = splitIntoLogicalLines(rawText).filter((line) => !isDeletedProvisionLine(line));
   const warnings: string[] = [];
   const metadata = {
     title: null as string | null,
@@ -88,7 +88,7 @@ export function parsePolicyText(rawText: string): ParseResult {
   };
 
   for (const rawLine of rawLines) {
-    const line = rawLine.trim();
+    const line = normalizeHierarchySpacing(rawLine.trim());
 
     if (!line) {
       continue;
@@ -167,7 +167,36 @@ function splitIntoLogicalLines(rawText: string) {
     .replace(/\s+(?=제\s*[0-9]+\s*장)/gu, "\n")
     .replace(/\s+(?=제\s*[0-9]+(?:의[0-9]+)?\s*조)/gu, "\n")
     .replace(/(?<=[^\n])(?=[①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳])/gu, "\n")
+    .replace(/(?:(?<=\s)|(?<=[.!?]))(?=[0-9]+\.(?=\s*[가-힣A-Za-z(<]))/gu, "\n")
+    .replace(/(?:(?<=\s)|(?<=[.!?]))(?=[0-9]+\)(?=\s*[가-힣A-Za-z(<]))/gu, "\n")
+    .replace(/(?:(?<=\s)|(?<=[.!?]))(?=[가-힣A-Za-z]\.(?=\s*[가-힣A-Za-z(<]))/gu, "\n")
     .split(/\n/u);
+}
+
+function normalizeHierarchySpacing(value: string) {
+  return value
+    .replace(/제\s*([0-9]+)\s*장/gu, "제$1장")
+    .replace(/제\s*([0-9]+(?:의[0-9]+)?)\s*조/gu, "제$1조");
+}
+
+function isDeletedProvisionLine(line: string) {
+  const normalized = normalizeText(line);
+
+  if (!normalized.includes("삭제") || !containsDateLikeText(normalized)) {
+    return false;
+  }
+
+  return (
+    /^제\s*[0-9]+(?:의[0-9]+)?\s*조/u.test(normalized) ||
+    /^제\s*[0-9]+\s*장/u.test(normalized) ||
+    /^[①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳]/u.test(normalized) ||
+    /^[0-9]+[.)]/u.test(normalized) ||
+    /^[가-힣A-Za-z]\./u.test(normalized)
+  );
+}
+
+function containsDateLikeText(value: string) {
+  return /[12][0-9]{3}\s*\.\s*[0-9]{1,2}\s*\.\s*[0-9]{1,2}\.*/u.test(value);
 }
 
 function consumeTopLevelMetadata(

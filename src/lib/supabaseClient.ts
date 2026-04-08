@@ -21,6 +21,9 @@ export function getSupabaseClient(): SupabaseClient {
   supabaseClient = createClient(url, anonKey, {
     auth: {
       storageKey: AUTH_STORAGE_KEY,
+      persistSession: true,
+      autoRefreshToken: true,
+      detectSessionInUrl: true,
     },
   });
 
@@ -90,4 +93,24 @@ export function clearAuthLocationArtifacts() {
   }
 
   window.history.replaceState({}, document.title, `${url.origin}${url.pathname}`);
+}
+
+export async function exchangeAuthCodeForSessionIfPresent() {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  const url = new URL(window.location.href);
+  const code = url.searchParams.get("code");
+  if (!code) {
+    return;
+  }
+
+  const supabase = getSupabaseClient();
+  const { error } = await supabase.auth.exchangeCodeForSession(code);
+  if (error) {
+    throw error;
+  }
+
+  clearAuthLocationArtifacts();
 }

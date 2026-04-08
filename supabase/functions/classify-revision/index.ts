@@ -95,6 +95,12 @@ Deno.serve(async (request) => {
           requestPurpose,
           diffPayload,
         });
+    const apiCallCount = useDeterministicOnly ? 0 : 1;
+    const cumulativeApiCallCount = await getCumulativeOpenAiApiCallCount(
+      supabase,
+      user.id,
+      apiCallCount,
+    );
 
     const { data: revisionDecision, error: revisionDecisionError } = await supabase
       .from("policy_revision_decisions")
@@ -108,6 +114,7 @@ Deno.serve(async (request) => {
         model_name: useDeterministicOnly ? null : openAiModel,
         request_purpose: requestPurpose,
         output_used_in_recommendation: true,
+        openai_api_call_count: cumulativeApiCallCount,
       })
       .select("id")
       .single();
@@ -125,6 +132,8 @@ Deno.serve(async (request) => {
         comparisonRunId: body.comparisonRunId,
         aiUsed: !useDeterministicOnly,
         modelName: useDeterministicOnly ? null : openAiModel,
+        apiCallCount,
+        cumulativeApiCallCount,
       },
     });
 
@@ -197,6 +206,33 @@ async function fetchComparisonRunWithResults(
     ...runResult.data,
     results: resultRows.data ?? [],
   };
+}
+
+async function getCumulativeOpenAiApiCallCount(
+  supabase: ReturnType<typeof createClient>,
+  userId: string,
+  nextCallCount = 0,
+) {
+  const { data, error } = await supabase
+    .from("policy_audit_logs")
+    .select("metadata")
+    .eq("actor_user_id", userId);
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  const cumulative = (data ?? []).reduce((total, row) => {
+    const metadata = row.metadata;
+    if (!metadata || typeof metadata !== "object") {
+      return total;
+    }
+
+    const count = (metadata as Record<string, unknown>).apiCallCount;
+    return total + (typeof count === "number" ? count : 0);
+  }, 0);
+
+  return cumulative + nextCallCount;
 }
 
 async function classifyWithOpenAi(input: {

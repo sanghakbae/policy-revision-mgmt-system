@@ -2,8 +2,12 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
 import { corsHeaders } from "../_shared/cors.ts";
 
 interface AnalyzeSelectedRevisionsRequest {
-  documentIds: string[];
+  stage?: "left" | "right" | "final";
+  targetDocumentIds: string[];
+  referenceDocumentIds: string[];
   lawVersionIds: string[];
+  leftGroupReport?: GroupReportResponse;
+  rightGroupReport?: GroupReportResponse;
 }
 
 interface OpenAIResponsesApiResponse {
@@ -11,31 +15,105 @@ interface OpenAIResponsesApiResponse {
   output_text?: string;
 }
 
-interface SelectedRevisionGuidanceResponse {
+interface GroupReportDocument {
+  document_id: string;
+  document_title: string;
+  key_points: string[];
+  source_paths: string[];
+}
+
+interface GroupReportRequirement {
+  topic: string;
+  detail: string;
+  source_titles: string[];
+  source_paths: string[];
+  notes: string;
+}
+
+interface GroupReportResponse {
+  summary: string;
+  key_findings: string[];
+  documents: GroupReportDocument[];
+  merged_requirements: GroupReportRequirement[];
+}
+
+interface ComparisonGapItem {
+  topic: string;
+  gap_type: string;
+  right_requirement: string;
+  left_current_state: string;
+  risk: string;
+  target_document_id: string;
+  target_document_title: string;
+  target_section_path: string;
+  recommended_revision: string;
+  policy_evidence_paths: string[];
+  comparison_source_title: string;
+  comparison_evidence_paths: string[];
+  confidence: number;
+}
+
+interface ComparisonCoveredItem {
+  topic: string;
+  reason: string;
+  policy_evidence_paths: string[];
+  comparison_evidence_paths: string[];
+}
+
+interface ComparisonDocumentAction {
+  document_id: string;
+  document_title: string;
+  actions: Array<{
+    target_section_path: string;
+    action: string;
+    instruction: string;
+  }>;
+}
+
+interface ComparisonReportResponse {
   summary: string;
   revision_needed: boolean;
   overall_comment: string;
-  why_revision_not_immediately_needed: string;
-  existing_policy_coverage: string[];
-  remaining_watchpoints: string[];
-  affected_documents: Array<{
-    document_id: string;
-    document_title: string;
-    target_section_path: string;
-    law_title: string;
-    policy_evidence_paths: string[];
-    law_evidence_paths: string[];
-    rationale: string;
-    confidence: number;
-    suggested_action: string;
-  }>;
-  general_recommendations: string[];
+  gaps: ComparisonGapItem[];
+  well_covered_items: ComparisonCoveredItem[];
+  document_actions: ComparisonDocumentAction[];
   low_confidence_notes: string[];
+  remaining_watchpoints: string[];
 }
 
 const MAX_SECTIONS_PER_DOCUMENT = 40;
 const MAX_SECTION_TEXT_LENGTH = 280;
 const OPENAI_TIMEOUT_MS = 45000;
+const LEFT_REPORT_INSTRUCTIONS = [
+  "너는 왼쪽 그룹의 정책·지침 문서를 누락 없이 정리하는 검토자다.",
+  "입력에 포함된 문서만 사용하고 없는 내용을 추정하지 마라.",
+  "요약이 아니라 실제 의무, 절차, 책임, 증빙, 예외, 주기, 통제 항목을 상세하게 재구성하라.",
+  "중복 항목은 병합할 수 있지만 문서명과 경로 추적은 유지하라.",
+  "source_paths에는 반드시 입력으로 제공된 경로만 넣어라.",
+  "문서별 key_points는 실질 요구사항 중심으로 작성하라.",
+  "merged_requirements는 왼쪽 그룹 전체를 대표하는 통합 요구사항이어야 한다.",
+  "반드시 JSON만 반환하라.",
+].join(" ");
+
+const RIGHT_REPORT_INSTRUCTIONS = [
+  "너는 오른쪽 그룹의 기준 문서와 법률을 기업 준거 기준으로 정리하는 검토자다.",
+  "입력에 포함된 문서와 법령만 사용하라.",
+  "일반 기업에 실질적으로 영향을 주는 의무, 절차, 통제, 기록, 보고, 보관, 책임 기준을 상세하게 추출하라.",
+  "공공부문 전용 조항은 notes에서 적용상 한계를 분명히 적어라.",
+  "source_paths에는 반드시 입력으로 제공된 경로만 넣어라.",
+  "documents와 merged_requirements 모두 누락 없이 작성하라.",
+  "반드시 JSON만 반환하라.",
+].join(" ");
+
+const COMPARISON_REPORT_INSTRUCTIONS = [
+  "너는 왼쪽 그룹 정리본과 오른쪽 그룹 정리본을 비교해 개정 필요사항을 도출하는 준거성 검토자다.",
+  "오른쪽 기준 대비 왼쪽에 없는 항목, 약한 항목, 모호한 항목, 절차나 증빙이 빠진 항목을 모두 찾아라.",
+  "과잉 권고는 하지 말고 근거 경로가 있는 경우만 판단하라.",
+  "gaps에는 실제 개정 지시 수준으로 구체적으로 적어라.",
+  "document_actions는 문서별 후속 조치를 정리하라.",
+  "well_covered_items에는 이미 충분히 커버된 항목만 넣어라.",
+  "반드시 JSON만 반환하라.",
+].join(" ");
 
 Deno.serve(async (request) => {
   if (request.method === "OPTIONS") {
@@ -74,58 +152,74 @@ Deno.serve(async (request) => {
     }
 
     const body = (await request.json()) as AnalyzeSelectedRevisionsRequest;
-    const documentIds = [...new Set(body.documentIds ?? [])].filter(Boolean);
+    const stage = body.stage ?? "final";
+    const targetDocumentIds = [...new Set(body.targetDocumentIds ?? [])].filter(Boolean);
+    const referenceDocumentIds = [...new Set(body.referenceDocumentIds ?? [])].filter(Boolean);
     const lawVersionIds = [...new Set(body.lawVersionIds ?? [])].filter(Boolean);
 
-    if (documentIds.length === 0 || lawVersionIds.length === 0) {
-      return json({ error: "documentIds and lawVersionIds are required." }, 400);
+    if (
+      targetDocumentIds.length === 0 ||
+      (referenceDocumentIds.length === 0 && lawVersionIds.length === 0)
+    ) {
+      return json(
+        {
+          error:
+            "targetDocumentIds and at least one of referenceDocumentIds or lawVersionIds are required.",
+        },
+        400,
+      );
     }
 
     const supabase = createClient(supabaseUrl, serviceRoleKey);
-    const [documents, laws] = await Promise.all([
-      fetchSelectedDocuments(supabase, documentIds, user.id),
+    const [targetDocuments, referenceDocuments, laws] = await Promise.all([
+      fetchSelectedDocuments(supabase, targetDocumentIds, user.id),
+      fetchSelectedDocuments(supabase, referenceDocumentIds, user.id),
       fetchSelectedLaws(supabase, lawVersionIds, user.id),
     ]);
 
-    const promptInput = {
-      request_purpose:
-        "Compare the full set of selected internal policies/guidelines against the selected registered laws and determine whether the company should revise its policies/guidelines overall, with document-specific comments when needed.",
-      organizational_scope:
-        "The target organization is a general private-sector company, not a government agency, public institution, or regulated public-sector operator unless the supplied law text clearly states that the obligation also applies to ordinary private companies.",
-      internal_documents: documents,
-      laws,
-      rules: [
-        "Treat internal policy/guideline sections as the controlled target documents.",
-        "Treat law sections as authoritative change drivers.",
-        "Filter out obligations that apply only to government agencies, public institutions, administrative bodies, or other public-sector entities unless the supplied law text clearly states that private companies are also covered.",
-        "Prioritize obligations that an ordinary private company must actually comply with.",
-        "Your primary task is to decide whether the selected company policies/guidelines overall need revision.",
-        "Return one overall comment that explains whether revision is needed and why.",
-        "If you judge that immediate revision is not necessary, you must still explain in detail why the need is low.",
-        "That explanation must specifically describe what the current internal policies/guidelines already cover and why that coverage appears sufficient based on the supplied law text.",
-        "You must also describe any remaining watchpoints, ambiguities, or future follow-up items even when immediate revision is not required.",
-        "When useful, include document-specific comments that identify the most relevant internal document and nearest target section path.",
-        "Do not invent unseen clauses.",
-        "Cite only supplied section paths.",
-        "The output may include both an overall company-level judgment and document-specific comments.",
-        "If uncertain, lower confidence and add a low confidence note.",
-      ],
-    };
+    let leftGroupReport: GroupReportResponse | null = null;
+    let rightGroupReport: GroupReportResponse | null = null;
+    let comparisonReport: ComparisonReportResponse | null = null;
 
-    const aiResult = await analyzeWithOpenAi({
-      apiKey: openAiApiKey,
-      model: openAiModel,
-      input: promptInput,
-    });
+    if (stage === "left") {
+      leftGroupReport = await analyzeLeftGroup({
+        apiKey: openAiApiKey,
+        model: openAiModel,
+        targetDocuments,
+      });
+    } else if (stage === "right") {
+      rightGroupReport = await analyzeRightGroup({
+        apiKey: openAiApiKey,
+        model: openAiModel,
+        referenceDocuments,
+        laws,
+      });
+    } else {
+      leftGroupReport = validateGroupReportResponse(body.leftGroupReport);
+      rightGroupReport = validateGroupReportResponse(body.rightGroupReport);
+      comparisonReport = await analyzeComparison({
+        apiKey: openAiApiKey,
+        model: openAiModel,
+        leftGroupReport,
+        rightGroupReport,
+      });
+    }
+
+    const callCount = 1;
+    const cumulativeApiCallCount = await getCumulativeOpenAiApiCallCount(supabase, user.id, callCount);
 
     const { error: auditError } = await supabase.from("policy_audit_logs").insert({
       actor_user_id: user.id,
       action: "SELECTED_REVISIONS_ANALYZED",
       result: "SUCCESS",
       metadata: {
-        documentIds,
+        targetDocumentIds,
+        referenceDocumentIds,
         lawVersionIds,
+        stage,
         modelName: openAiModel,
+        apiCallCount: callCount,
+        cumulativeApiCallCount,
       },
     });
 
@@ -136,14 +230,18 @@ Deno.serve(async (request) => {
     return json({
       status: "success",
       data: {
-        ...aiResult,
+        stage,
+        left_group_report: leftGroupReport,
+        right_group_report: rightGroupReport,
+        comparison_report: comparisonReport,
         model: openAiModel,
-        api_call_count: 1,
+        api_call_count: cumulativeApiCallCount,
       },
       warnings: [],
       confidence: 1,
       traceability: {
-        documentIds,
+        targetDocumentIds,
+        referenceDocumentIds,
         lawVersionIds,
         aiUsed: true,
         model: openAiModel,
@@ -215,6 +313,10 @@ async function fetchSelectedLaws(
   lawVersionIds: string[],
   userId: string,
 ) {
+  if (lawVersionIds.length === 0) {
+    return [];
+  }
+
   const { data, error } = await supabase
     .from("policy_law_versions")
     .select("id, version_label, effective_date, policy_law_sources!inner(owner_user_id, source_title)")
@@ -256,11 +358,254 @@ async function fetchSelectedLaws(
   return laws;
 }
 
-async function analyzeWithOpenAi(input: {
+async function analyzeLeftGroup(input: {
   apiKey: string;
   model: string;
-  input: unknown;
-}): Promise<SelectedRevisionGuidanceResponse> {
+  targetDocuments: unknown[];
+}) {
+  const payload = {
+    group_name: "left",
+    task: "왼쪽 그룹 정책·지침 정리",
+    target_documents: input.targetDocuments,
+  };
+
+  return await analyzeWithOpenAi<GroupReportResponse>({
+    apiKey: input.apiKey,
+    model: input.model,
+    instructions: LEFT_REPORT_INSTRUCTIONS,
+    promptInput: payload,
+    schemaName: "left_group_report",
+    schema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        summary: { type: "string" },
+        key_findings: { type: "array", items: { type: "string" } },
+        documents: {
+          type: "array",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              document_id: { type: "string" },
+              document_title: { type: "string" },
+              key_points: { type: "array", items: { type: "string" } },
+              source_paths: { type: "array", items: { type: "string" } },
+            },
+            required: ["document_id", "document_title", "key_points", "source_paths"],
+          },
+        },
+        merged_requirements: {
+          type: "array",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              topic: { type: "string" },
+              detail: { type: "string" },
+              source_titles: { type: "array", items: { type: "string" } },
+              source_paths: { type: "array", items: { type: "string" } },
+              notes: { type: "string" },
+            },
+            required: ["topic", "detail", "source_titles", "source_paths", "notes"],
+          },
+        },
+      },
+      required: ["summary", "key_findings", "documents", "merged_requirements"],
+    },
+    validator: validateGroupReportResponse,
+  });
+}
+
+async function analyzeRightGroup(input: {
+  apiKey: string;
+  model: string;
+  referenceDocuments: unknown[];
+  laws: unknown[];
+}) {
+  const payload = {
+    group_name: "right",
+    task: "오른쪽 그룹 기준 정리",
+    reference_documents: input.referenceDocuments,
+    reference_laws: input.laws,
+  };
+
+  return await analyzeWithOpenAi<GroupReportResponse>({
+    apiKey: input.apiKey,
+    model: input.model,
+    instructions: RIGHT_REPORT_INSTRUCTIONS,
+    promptInput: payload,
+    schemaName: "right_group_report",
+    schema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        summary: { type: "string" },
+        key_findings: { type: "array", items: { type: "string" } },
+        documents: {
+          type: "array",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              document_id: { type: "string" },
+              document_title: { type: "string" },
+              key_points: { type: "array", items: { type: "string" } },
+              source_paths: { type: "array", items: { type: "string" } },
+            },
+            required: ["document_id", "document_title", "key_points", "source_paths"],
+          },
+        },
+        merged_requirements: {
+          type: "array",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              topic: { type: "string" },
+              detail: { type: "string" },
+              source_titles: { type: "array", items: { type: "string" } },
+              source_paths: { type: "array", items: { type: "string" } },
+              notes: { type: "string" },
+            },
+            required: ["topic", "detail", "source_titles", "source_paths", "notes"],
+          },
+        },
+      },
+      required: ["summary", "key_findings", "documents", "merged_requirements"],
+    },
+    validator: validateGroupReportResponse,
+  });
+}
+
+async function analyzeComparison(input: {
+  apiKey: string;
+  model: string;
+  leftGroupReport: GroupReportResponse;
+  rightGroupReport: GroupReportResponse;
+}) {
+  const payload = {
+    task: "좌우 그룹 상세 비교",
+    left_group_report: input.leftGroupReport,
+    right_group_report: input.rightGroupReport,
+  };
+
+  return await analyzeWithOpenAi<ComparisonReportResponse>({
+    apiKey: input.apiKey,
+    model: input.model,
+    instructions: COMPARISON_REPORT_INSTRUCTIONS,
+    promptInput: payload,
+    schemaName: "comparison_report",
+    schema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        summary: { type: "string" },
+        revision_needed: { type: "boolean" },
+        overall_comment: { type: "string" },
+        gaps: {
+          type: "array",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              topic: { type: "string" },
+              gap_type: { type: "string" },
+              right_requirement: { type: "string" },
+              left_current_state: { type: "string" },
+              risk: { type: "string" },
+              target_document_id: { type: "string" },
+              target_document_title: { type: "string" },
+              target_section_path: { type: "string" },
+              recommended_revision: { type: "string" },
+              policy_evidence_paths: { type: "array", items: { type: "string" } },
+              comparison_source_title: { type: "string" },
+              comparison_evidence_paths: { type: "array", items: { type: "string" } },
+              confidence: { type: "number", minimum: 0, maximum: 1 },
+            },
+            required: [
+              "topic",
+              "gap_type",
+              "right_requirement",
+              "left_current_state",
+              "risk",
+              "target_document_id",
+              "target_document_title",
+              "target_section_path",
+              "recommended_revision",
+              "policy_evidence_paths",
+              "comparison_source_title",
+              "comparison_evidence_paths",
+              "confidence",
+            ],
+          },
+        },
+        well_covered_items: {
+          type: "array",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              topic: { type: "string" },
+              reason: { type: "string" },
+              policy_evidence_paths: { type: "array", items: { type: "string" } },
+              comparison_evidence_paths: { type: "array", items: { type: "string" } },
+            },
+            required: ["topic", "reason", "policy_evidence_paths", "comparison_evidence_paths"],
+          },
+        },
+        document_actions: {
+          type: "array",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              document_id: { type: "string" },
+              document_title: { type: "string" },
+              actions: {
+                type: "array",
+                items: {
+                  type: "object",
+                  additionalProperties: false,
+                  properties: {
+                    target_section_path: { type: "string" },
+                    action: { type: "string" },
+                    instruction: { type: "string" },
+                  },
+                  required: ["target_section_path", "action", "instruction"],
+                },
+              },
+            },
+            required: ["document_id", "document_title", "actions"],
+          },
+        },
+        low_confidence_notes: { type: "array", items: { type: "string" } },
+        remaining_watchpoints: { type: "array", items: { type: "string" } },
+      },
+      required: [
+        "summary",
+        "revision_needed",
+        "overall_comment",
+        "gaps",
+        "well_covered_items",
+        "document_actions",
+        "low_confidence_notes",
+        "remaining_watchpoints",
+      ],
+    },
+    validator: validateComparisonReportResponse,
+  });
+}
+
+async function analyzeWithOpenAi<T>(input: {
+  apiKey: string;
+  model: string;
+  instructions: string;
+  promptInput: unknown;
+  schemaName: string;
+  schema: Record<string, unknown>;
+  validator: (value: unknown) => T;
+}): Promise<T> {
   const response = await fetch("https://api.openai.com/v1/responses", {
     method: "POST",
     headers: {
@@ -270,97 +615,14 @@ async function analyzeWithOpenAi(input: {
     signal: AbortSignal.timeout(OPENAI_TIMEOUT_MS),
     body: JSON.stringify({
       model: input.model,
-      instructions: [
-        "You analyze selected internal policies/guidelines against selected laws.",
-        "The target organization is an ordinary private company.",
-        "Ignore public-sector-only obligations unless the supplied law text clearly extends them to ordinary private companies.",
-        "Return only structured JSON.",
-        "Decide whether the selected company policies/guidelines as a whole need revision based on the supplied laws.",
-        "You must always fill every required field in the schema with substantive content.",
-        "summary must be a concise overview of the comparison outcome.",
-        "overall_comment must be a detailed narrative explaining whether revision is needed and why.",
-        "If revision_needed is false, why_revision_not_immediately_needed must contain a concrete, multi-sentence explanation. It must not be empty, generic, or a restatement of the boolean.",
-        "If revision_needed is false, existing_policy_coverage must list the concrete topics or obligations that are already covered by current policies/guidelines.",
-        "If revision_needed is false, remaining_watchpoints must still list any monitoring points, ambiguities, or future follow-up needs.",
-        "If revision_needed is true, why_revision_not_immediately_needed should explain why immediate full revision cannot be deferred.",
-        "general_recommendations must contain actionable reviewer guidance, not placeholders.",
-        "When useful, affected_documents must name the affected internal document and nearest target section path.",
-        "Use only supplied section paths.",
-        "Do not make unsupported legal claims.",
-        "If evidence is weak, reduce confidence and add a low confidence note.",
-      ].join(" "),
-      input: JSON.stringify(input.input),
+      instructions: input.instructions,
+      input: JSON.stringify(input.promptInput),
       text: {
         format: {
           type: "json_schema",
-          name: "selected_revision_guidance",
+          name: input.schemaName,
           strict: true,
-          schema: {
-            type: "object",
-            additionalProperties: false,
-            properties: {
-              summary: { type: "string" },
-              revision_needed: { type: "boolean" },
-              overall_comment: { type: "string" },
-              why_revision_not_immediately_needed: { type: "string" },
-              existing_policy_coverage: {
-                type: "array",
-                items: { type: "string" },
-              },
-              remaining_watchpoints: {
-                type: "array",
-                items: { type: "string" },
-              },
-              affected_documents: {
-                type: "array",
-                items: {
-                  type: "object",
-                  additionalProperties: false,
-                  properties: {
-                    document_id: { type: "string" },
-                    document_title: { type: "string" },
-                    target_section_path: { type: "string" },
-                    law_title: { type: "string" },
-                    policy_evidence_paths: { type: "array", items: { type: "string" } },
-                    law_evidence_paths: { type: "array", items: { type: "string" } },
-                    rationale: { type: "string" },
-                    confidence: { type: "number", minimum: 0, maximum: 1 },
-                    suggested_action: { type: "string" },
-                  },
-                  required: [
-                    "document_id",
-                    "document_title",
-                    "target_section_path",
-                    "law_title",
-                    "policy_evidence_paths",
-                    "law_evidence_paths",
-                    "rationale",
-                    "confidence",
-                    "suggested_action",
-                  ],
-                },
-              },
-              general_recommendations: {
-                type: "array",
-                items: { type: "string" },
-              },
-              low_confidence_notes: {
-                type: "array",
-                items: { type: "string" },
-              },
-            },
-            required: [
-              "summary",
-              "revision_needed",
-              "overall_comment",
-              "why_revision_not_immediately_needed",
-              "existing_policy_coverage",
-              "remaining_watchpoints",
-              "affected_documents",
-              "general_recommendations",
-              "low_confidence_notes",
-            ],
-          },
+          schema: input.schema,
         },
       },
     }),
@@ -379,84 +641,178 @@ async function analyzeWithOpenAi(input: {
 
   const payload = (await response.json()) as OpenAIResponsesApiResponse;
   if (payload.output_parsed && typeof payload.output_parsed === "object") {
-    return validateSelectedRevisionGuidanceResponse(payload.output_parsed);
+    return input.validator(payload.output_parsed);
   }
 
   if (payload.output_text?.trim()) {
-    return validateSelectedRevisionGuidanceResponse(JSON.parse(payload.output_text));
+    return input.validator(JSON.parse(payload.output_text));
   }
 
   throw new Error("OpenAI API returned no structured analysis payload.");
 }
 
-function validateSelectedRevisionGuidanceResponse(
-  value: unknown,
-): SelectedRevisionGuidanceResponse {
+function validateGroupReportResponse(value: unknown): GroupReportResponse {
   if (!value || typeof value !== "object") {
-    throw new Error("AI analysis response was not a JSON object.");
+    throw new Error("Group report response was not a JSON object.");
   }
 
   const candidate = value as Record<string, unknown>;
   const requireString = (field: string) => {
     const fieldValue = candidate[field];
     if (typeof fieldValue !== "string" || fieldValue.trim().length === 0) {
-      throw new Error(`AI analysis response field '${field}' was empty.`);
+      throw new Error(`Group report field '${field}' was empty.`);
     }
     return fieldValue.trim();
   };
-  const requireStringArray = (field: string, minimumLength = 0) => {
-    const fieldValue = candidate[field];
+  const requireStringArray = (field: string, minimumLength = 0, source = candidate) => {
+    const fieldValue = source[field];
     if (!Array.isArray(fieldValue)) {
-      throw new Error(`AI analysis response field '${field}' was invalid.`);
+      throw new Error(`Group report field '${field}' was invalid.`);
     }
     const normalized = fieldValue.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0);
     if (normalized.length < minimumLength) {
-      throw new Error(`AI analysis response field '${field}' did not contain enough detail.`);
+      throw new Error(`Group report field '${field}' did not contain enough detail.`);
+    }
+    return normalized;
+  };
+
+  const documentsRaw = candidate.documents;
+  const mergedRaw = candidate.merged_requirements;
+  if (!Array.isArray(documentsRaw) || !Array.isArray(mergedRaw)) {
+    throw new Error("Group report arrays were invalid.");
+  }
+
+  return {
+    summary: requireString("summary"),
+    key_findings: requireStringArray("key_findings", 1),
+    documents: documentsRaw.map((entry) => {
+      if (!entry || typeof entry !== "object") {
+        throw new Error("Group report document item was invalid.");
+      }
+      const item = entry as Record<string, unknown>;
+      return {
+        document_id: typeof item.document_id === "string" ? item.document_id : "",
+        document_title: typeof item.document_title === "string" ? item.document_title : "",
+        key_points: requireStringArray("key_points", 1, item),
+        source_paths: requireStringArray("source_paths", 0, item),
+      };
+    }),
+    merged_requirements: mergedRaw.map((entry) => {
+      if (!entry || typeof entry !== "object") {
+        throw new Error("Group report merged requirement item was invalid.");
+      }
+      const item = entry as Record<string, unknown>;
+      return {
+        topic: typeof item.topic === "string" ? item.topic.trim() : "",
+        detail: typeof item.detail === "string" ? item.detail.trim() : "",
+        source_titles: requireStringArray("source_titles", 0, item),
+        source_paths: requireStringArray("source_paths", 0, item),
+        notes: typeof item.notes === "string" ? item.notes.trim() : "",
+      };
+    }),
+  };
+}
+
+function validateComparisonReportResponse(value: unknown): ComparisonReportResponse {
+  if (!value || typeof value !== "object") {
+    throw new Error("Comparison report response was not a JSON object.");
+  }
+
+  const candidate = value as Record<string, unknown>;
+  const requireString = (field: string, source = candidate) => {
+    const fieldValue = source[field];
+    if (typeof fieldValue !== "string" || fieldValue.trim().length === 0) {
+      throw new Error(`Comparison report field '${field}' was empty.`);
+    }
+    return fieldValue.trim();
+  };
+  const requireStringArray = (field: string, minimumLength = 0, source = candidate) => {
+    const fieldValue = source[field];
+    if (!Array.isArray(fieldValue)) {
+      throw new Error(`Comparison report field '${field}' was invalid.`);
+    }
+    const normalized = fieldValue.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0);
+    if (normalized.length < minimumLength) {
+      throw new Error(`Comparison report field '${field}' did not contain enough detail.`);
     }
     return normalized;
   };
 
   if (typeof candidate.revision_needed !== "boolean") {
-    throw new Error("AI analysis response field 'revision_needed' was invalid.");
+    throw new Error("Comparison report field 'revision_needed' was invalid.");
   }
 
-  const affectedDocumentsRaw = candidate.affected_documents;
-  if (!Array.isArray(affectedDocumentsRaw)) {
-    throw new Error("AI analysis response field 'affected_documents' was invalid.");
+  const gapsRaw = candidate.gaps;
+  const coveredRaw = candidate.well_covered_items;
+  const actionsRaw = candidate.document_actions;
+  if (!Array.isArray(gapsRaw) || !Array.isArray(coveredRaw) || !Array.isArray(actionsRaw)) {
+    throw new Error("Comparison report arrays were invalid.");
   }
-
-  const affected_documents = affectedDocumentsRaw.map((entry) => {
-    if (!entry || typeof entry !== "object") {
-      throw new Error("AI analysis response contained an invalid affected document.");
-    }
-    const item = entry as Record<string, unknown>;
-    return {
-      document_id: typeof item.document_id === "string" ? item.document_id : "",
-      document_title: typeof item.document_title === "string" ? item.document_title : "",
-      target_section_path: typeof item.target_section_path === "string" ? item.target_section_path : "",
-      law_title: typeof item.law_title === "string" ? item.law_title : "",
-      policy_evidence_paths: Array.isArray(item.policy_evidence_paths)
-        ? item.policy_evidence_paths.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
-        : [],
-      law_evidence_paths: Array.isArray(item.law_evidence_paths)
-        ? item.law_evidence_paths.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
-        : [],
-      rationale: typeof item.rationale === "string" ? item.rationale.trim() : "",
-      confidence: typeof item.confidence === "number" ? item.confidence : 0,
-      suggested_action: typeof item.suggested_action === "string" ? item.suggested_action.trim() : "",
-    };
-  });
 
   return {
     summary: requireString("summary"),
     revision_needed: candidate.revision_needed,
     overall_comment: requireString("overall_comment"),
-    why_revision_not_immediately_needed: requireString("why_revision_not_immediately_needed"),
-    existing_policy_coverage: requireStringArray("existing_policy_coverage", 1),
-    remaining_watchpoints: requireStringArray("remaining_watchpoints", 1),
-    affected_documents,
-    general_recommendations: requireStringArray("general_recommendations", 1),
+    gaps: gapsRaw.map((entry) => {
+      if (!entry || typeof entry !== "object") {
+        throw new Error("Comparison gap item was invalid.");
+      }
+      const item = entry as Record<string, unknown>;
+      return {
+        topic: requireString("topic", item),
+        gap_type: requireString("gap_type", item),
+        right_requirement: requireString("right_requirement", item),
+        left_current_state: requireString("left_current_state", item),
+        risk: requireString("risk", item),
+        target_document_id: typeof item.target_document_id === "string" ? item.target_document_id : "",
+        target_document_title: requireString("target_document_title", item),
+        target_section_path: requireString("target_section_path", item),
+        recommended_revision: requireString("recommended_revision", item),
+        policy_evidence_paths: requireStringArray("policy_evidence_paths", 0, item),
+        comparison_source_title: requireString("comparison_source_title", item),
+        comparison_evidence_paths: requireStringArray("comparison_evidence_paths", 0, item),
+        confidence: typeof item.confidence === "number" ? item.confidence : 0,
+      };
+    }),
+    well_covered_items: coveredRaw.map((entry) => {
+      if (!entry || typeof entry !== "object") {
+        throw new Error("Comparison covered item was invalid.");
+      }
+      const item = entry as Record<string, unknown>;
+      return {
+        topic: requireString("topic", item),
+        reason: requireString("reason", item),
+        policy_evidence_paths: requireStringArray("policy_evidence_paths", 0, item),
+        comparison_evidence_paths: requireStringArray("comparison_evidence_paths", 0, item),
+      };
+    }),
+    document_actions: actionsRaw.map((entry) => {
+      if (!entry || typeof entry !== "object") {
+        throw new Error("Comparison document action item was invalid.");
+      }
+      const item = entry as Record<string, unknown>;
+      const nestedActions = item.actions;
+      if (!Array.isArray(nestedActions)) {
+        throw new Error("Comparison document action list was invalid.");
+      }
+      return {
+        document_id: typeof item.document_id === "string" ? item.document_id : "",
+        document_title: requireString("document_title", item),
+        actions: nestedActions.map((nested) => {
+          if (!nested || typeof nested !== "object") {
+            throw new Error("Comparison action detail was invalid.");
+          }
+          const nestedItem = nested as Record<string, unknown>;
+          return {
+            target_section_path: requireString("target_section_path", nestedItem),
+            action: requireString("action", nestedItem),
+            instruction: requireString("instruction", nestedItem),
+          };
+        }),
+      };
+    }),
     low_confidence_notes: requireStringArray("low_confidence_notes", 0),
+    remaining_watchpoints: requireStringArray("remaining_watchpoints", 0),
   };
 }
 
@@ -474,6 +830,33 @@ function summarizeSections(
       path: section.path_display,
       text: clipText(section.original_text, MAX_SECTION_TEXT_LENGTH),
     }));
+}
+
+async function getCumulativeOpenAiApiCallCount(
+  supabase: ReturnType<typeof createClient>,
+  userId: string,
+  nextCallCount = 0,
+) {
+  const { data, error } = await supabase
+    .from("policy_audit_logs")
+    .select("metadata")
+    .eq("actor_user_id", userId);
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  const cumulative = (data ?? []).reduce((total, row) => {
+    const metadata = row.metadata;
+    if (!metadata || typeof metadata !== "object") {
+      return total;
+    }
+
+    const count = (metadata as Record<string, unknown>).apiCallCount;
+    return total + (typeof count === "number" ? count : 0);
+  }, 0);
+
+  return cumulative + nextCallCount;
 }
 
 function extractBearerToken(value: string | null) {

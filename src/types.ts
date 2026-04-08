@@ -13,6 +13,7 @@ export interface DocumentSummary {
   version_number: number;
   version_id?: string;
   created_at: string;
+  effective_date?: string | null;
   section_count: number;
 }
 
@@ -78,6 +79,7 @@ export interface DocumentSectionRecord {
 
 export interface DocumentDetail {
   id: string;
+  version_id?: string;
   title: string;
   description: string | null;
   document_type: string;
@@ -169,24 +171,97 @@ export interface AiRevisionGuidanceItem {
   document_id: string;
   document_title: string;
   target_section_path: string;
-  law_title: string;
+  comparison_source_title: string;
   policy_evidence_paths: string[];
-  law_evidence_paths: string[];
+  comparison_evidence_paths: string[];
   rationale: string;
   confidence: number;
   suggested_action: string;
 }
 
-export interface AiRevisionGuidance {
+export interface AiGroupReportDocument {
+  document_id: string;
+  document_title: string;
+  key_points: string[];
+  source_paths: string[];
+}
+
+export interface AiGroupReportRequirement {
+  topic: string;
+  detail: string;
+  source_titles: string[];
+  source_paths: string[];
+  notes: string;
+}
+
+export interface AiGroupReport {
+  summary: string;
+  key_findings: string[];
+  documents: AiGroupReportDocument[];
+  merged_requirements: AiGroupReportRequirement[];
+}
+
+export interface AiComparisonGap {
+  topic: string;
+  gap_type: string;
+  right_requirement: string;
+  left_current_state: string;
+  risk: string;
+  target_document_id: string;
+  target_document_title: string;
+  target_section_path: string;
+  recommended_revision: string;
+  policy_evidence_paths: string[];
+  comparison_source_title: string;
+  comparison_evidence_paths: string[];
+  confidence: number;
+}
+
+export interface AiComparisonCoveredItem {
+  topic: string;
+  reason: string;
+  policy_evidence_paths: string[];
+  comparison_evidence_paths: string[];
+}
+
+export interface AiComparisonDocumentActionItem {
+  target_section_path: string;
+  action: string;
+  instruction: string;
+}
+
+export interface AiComparisonDocumentAction {
+  document_id: string;
+  document_title: string;
+  actions: AiComparisonDocumentActionItem[];
+}
+
+export interface AiComparisonReport {
   summary: string;
   revision_needed: boolean;
   overall_comment: string;
-  why_revision_not_immediately_needed: string;
-  existing_policy_coverage: string[];
-  remaining_watchpoints: string[];
-  affected_documents: AiRevisionGuidanceItem[];
-  general_recommendations: string[];
+  gaps: AiComparisonGap[];
+  well_covered_items: AiComparisonCoveredItem[];
+  document_actions: AiComparisonDocumentAction[];
   low_confidence_notes: string[];
+  remaining_watchpoints: string[];
+}
+
+export type AiRevisionAnalysisStage = "left" | "right" | "final";
+
+export interface AiRevisionGuidance {
+  left_group_report: AiGroupReport;
+  right_group_report: AiGroupReport;
+  comparison_report: AiComparisonReport;
+  model: string | null;
+  api_call_count: number;
+}
+
+export interface AiRevisionStageResult {
+  stage: AiRevisionAnalysisStage;
+  left_group_report: AiGroupReport | null;
+  right_group_report: AiGroupReport | null;
+  comparison_report: AiComparisonReport | null;
   model: string | null;
   api_call_count: number;
 }

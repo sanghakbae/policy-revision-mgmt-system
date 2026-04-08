@@ -1,5 +1,7 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
 import { corsHeaders } from "../_shared/cors.ts";
+import { parsePolicyText } from "../_shared/policyParser.ts";
+import { buildSectionHierarchyColumns } from "../_shared/sectionHierarchyColumns.ts";
 
 type ManageLawSourceRequest =
   | {
@@ -9,6 +11,10 @@ type ManageLawSourceRequest =
       sourceTitle?: string;
       versionLabel?: string;
       effectiveDate?: string | null;
+    }
+  | {
+      action: "reparse";
+      lawVersionId: string;
     }
   | {
       action: "delete";
@@ -57,7 +63,7 @@ Deno.serve(async (request) => {
 
     const { data: lawVersion, error: lawVersionError } = await supabase
       .from("policy_law_versions")
-      .select("id, law_source_id, policy_law_sources!inner(id, owner_user_id)")
+      .select("id, law_source_id, raw_text, policy_law_sources!inner(id, owner_user_id, source_link, source_title)")
       .eq("id", body.lawVersionId)
       .single();
 
@@ -118,6 +124,76 @@ Deno.serve(async (request) => {
         status: "success",
         data: {
           lawVersionId: body.lawVersionId,
+        },
+      });
+    }
+
+    if (body.action === "reparse") {
+      const parseResult = parsePolicyText(lawVersion.raw_text ?? "");
+      const hierarchyColumnsById = buildSectionHierarchyColumns(parseResult.sections);
+      const sections = await Promise.all(
+        parseResult.sections.map(async (section) => ({
+          id: section.tempId,
+          law_version_id: lawVersion.id,
+          parent_section_id: section.parentTempId,
+          hierarchy_type: section.hierarchyType,
+          hierarchy_label: section.hierarchyLabel,
+          hierarchy_order: section.hierarchyOrder,
+          normalized_text: section.normalizedText,
+          original_text: section.originalText,
+          text_hash: await sha256(section.normalizedText),
+          path_display: section.path.join(" > "),
+          ...hierarchyColumnsById.get(section.tempId),
+        })),
+      );
+
+      const { error: deleteSectionsError } = await supabase
+        .from("policy_law_sections")
+        .delete()
+        .eq("law_version_id", body.lawVersionId);
+
+      if (deleteSectionsError) {
+        throw deleteSectionsError;
+      }
+
+      if (sections.length > 0) {
+        const { error: insertSectionsError } = await supabase
+          .from("policy_law_sections")
+          .insert(sections);
+
+        if (insertSectionsError) {
+          throw insertSectionsError;
+        }
+      }
+
+      const { error: updateVersionError } = await supabase
+        .from("policy_law_versions")
+        .update({
+          parse_warnings: parseResult.warnings,
+        })
+        .eq("id", body.lawVersionId);
+
+      if (updateVersionError) {
+        throw updateVersionError;
+      }
+
+      await supabase.from("policy_audit_logs").insert({
+        actor_user_id: user.id,
+        action: "LAW_SOURCE_REPARSED",
+        result: "SUCCESS",
+        metadata: {
+          lawVersionId: body.lawVersionId,
+          lawSourceId: lawVersion.law_source_id,
+          sectionCount: sections.length,
+        },
+      });
+
+      return json({
+        status: "success",
+        data: {
+          lawVersionId: body.lawVersionId,
+          sectionCount: sections.length,
+          warnings: parseResult.warnings,
         },
       });
     }
@@ -205,4 +281,12 @@ function json(data: unknown, status = 200) {
       "Content-Type": "application/json",
     },
   });
+}
+
+async function sha256(input: string) {
+  const bytes = new TextEncoder().encode(input);
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(digest))
+    .map((value) => value.toString(16).padStart(2, "0"))
+    .join("");
 }

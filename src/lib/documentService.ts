@@ -4,7 +4,9 @@ import {
 } from "./supabaseClient";
 import type {
   AiRevisionGuidance,
+  AiRevisionStageResult,
   AggregatedComparisonResultRecord,
+  AiRevisionAnalysisStage,
   ComparisonReviewAggregate,
   ComparisonResultRecord,
   ComparisonReviewDetail,
@@ -14,6 +16,8 @@ import type {
   LawDetail,
   LawVersionSummary,
 } from "../types";
+import { parsePolicyText } from "../../shared/policyParser";
+import { buildSectionHierarchyColumns } from "../../shared/sectionHierarchyColumns";
 
 interface ComparisonRunMetaRow {
   id: string;
@@ -39,24 +43,105 @@ export async function uploadDocument(input: {
     const currentUser = await ensureAuthenticatedUser(session.access_token);
     const fileContentBase64 = await encodeFileAsBase64(input.file);
     const fileText = await extractDocumentText(input.file);
-    return await invokeEdgeFunction(
-      "register-document",
-      {
-        title: input.title,
-        description: input.description,
-        documentType: "POLICY",
-        originalFileName: input.file.name,
-        fileContentBase64,
+    const supabase = getSupabaseClient();
+    const storagePath = buildClientStoragePath(currentUser.id, input.file.name);
+    const fileBytes = decodeBase64ToBytes(fileContentBase64);
+    const { error: uploadError } = await supabase.storage
+      .from("source-documents")
+      .upload(storagePath, fileBytes, {
+        upsert: false,
         contentType: input.file.type || guessContentType(input.file.name),
-        rawText: fileText,
+      });
+
+    if (uploadError) {
+      throw new Error(buildAuthDebugMessage(`document upload failed: ${uploadError.message}`, session));
+    }
+
+    const parseResult = parsePolicyText(fileText);
+    const inferredDocumentType = inferClientDocumentType({
+      inputTitle: input.title,
+      parsedTitle: parseResult.metadata.title,
+      rawText: fileText,
+    });
+
+    const { data: document, error: documentError } = await supabase
+      .from("policy_documents")
+      .insert({
+        owner_user_id: currentUser.id,
+        title: input.title,
+        description: input.description || null,
+        document_type: inferredDocumentType,
+        source_storage_path: storagePath,
+        source_file_name: input.file.name,
+      })
+      .select("id")
+      .single();
+
+    if (documentError || !document) {
+      throw new Error(buildAuthDebugMessage(`document insert failed: ${documentError?.message ?? "unknown"}`, session));
+    }
+
+    const { data: version, error: versionError } = await supabase
+      .from("policy_document_versions")
+      .insert({
+        document_id: document.id,
+        version_number: 1,
+        raw_text: fileText,
+        parse_warnings: parseResult.warnings,
+      })
+      .select("id")
+      .single();
+
+    if (versionError || !version) {
+      throw new Error(buildAuthDebugMessage(`document version insert failed: ${versionError?.message ?? "unknown"}`, session));
+    }
+
+    const hierarchyColumnsById = buildSectionHierarchyColumns(parseResult.sections);
+    const rows = await Promise.all(parseResult.sections.map(async (section) => ({
+      id: section.tempId,
+      document_version_id: version.id,
+      parent_section_id: section.parentTempId,
+      hierarchy_type: section.hierarchyType,
+      hierarchy_label: section.hierarchyLabel,
+      hierarchy_order: section.hierarchyOrder,
+      normalized_text: section.normalizedText,
+      original_text: section.originalText,
+      text_hash: await sha256Hex(section.normalizedText),
+      path_display: section.path.join(" > "),
+      ...hierarchyColumnsById.get(section.tempId),
+    })));
+
+    if (rows.length > 0) {
+      const { error: sectionError } = await supabase
+        .from("policy_document_sections")
+        .insert(rows);
+
+      if (sectionError) {
+        throw new Error(buildAuthDebugMessage(`document section insert failed: ${sectionError.message}`, session));
+      }
+    }
+
+    await supabase.from("policy_audit_logs").insert({
+      actor_user_id: currentUser.id,
+      action: "DOCUMENT_REGISTERED",
+      target_document_id: document.id,
+      result: "SUCCESS",
+      metadata: {
+        versionId: version.id,
+        sectionCount: rows.length,
+        warningCount: parseResult.warnings.length,
       },
-      {
-        stage: "edge-function",
-        fileName: input.file.name,
-        session,
-        userId: currentUser.id,
+    });
+
+    return {
+      status: "success",
+      data: {
+        documentId: document.id,
+        versionId: version.id,
+        sectionCount: rows.length,
+        warnings: parseResult.warnings,
       },
-    );
+    };
   } catch (error) {
     if (error instanceof Error) {
       throw error;
@@ -66,13 +151,110 @@ export async function uploadDocument(input: {
   }
 }
 
+export async function deleteDocument(input: { documentId: string }) {
+  const session = await ensureAuthenticatedSession();
+  const currentUser = await ensureAuthenticatedUser(session.access_token);
+  const supabase = getSupabaseClient();
+  const { error } = await supabase
+    .from("policy_documents")
+    .delete()
+    .eq("id", input.documentId);
+
+  if (error) {
+    throw new Error(buildAuthDebugMessage(`delete-document direct delete failed: ${error.message}`, session));
+  }
+
+  return {
+    status: "success",
+    data: {
+      documentId: input.documentId,
+      deletedBy: currentUser.id,
+    },
+  };
+}
+
+export async function reparseDocument(input: { documentId: string }) {
+  const session = await ensureAuthenticatedSession();
+  const currentUser = await ensureAuthenticatedUser(session.access_token);
+  const supabase = getSupabaseClient();
+  const { data: version, error: versionError } = await supabase
+    .from("policy_document_versions")
+    .select("id, raw_text, version_number, created_at")
+    .eq("document_id", input.documentId)
+    .order("version_number", { ascending: false })
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .single();
+
+  if (versionError || !version) {
+    throw new Error(buildAuthDebugMessage(`reparse-document load failed: ${versionError?.message ?? "Latest version not found."}`, session));
+  }
+
+  const parseResult = parsePolicyText(version.raw_text ?? "");
+  const hierarchyColumnsById = buildSectionHierarchyColumns(parseResult.sections);
+  const rows = await Promise.all(parseResult.sections.map(async (section) => ({
+    id: section.tempId,
+    document_version_id: version.id,
+    parent_section_id: section.parentTempId,
+    hierarchy_type: section.hierarchyType,
+    hierarchy_label: section.hierarchyLabel,
+    hierarchy_order: section.hierarchyOrder,
+    normalized_text: section.normalizedText,
+    original_text: section.originalText,
+    text_hash: await sha256Hex(section.normalizedText),
+    path_display: section.path.join(" > "),
+    ...hierarchyColumnsById.get(section.tempId),
+  })));
+
+  const { error: deleteSectionsError } = await supabase
+    .from("policy_document_sections")
+    .delete()
+    .eq("document_version_id", version.id);
+
+  if (deleteSectionsError) {
+    throw new Error(buildAuthDebugMessage(`reparse-document delete failed: ${deleteSectionsError.message}`, session));
+  }
+
+  if (rows.length > 0) {
+    const { error: insertError } = await supabase
+      .from("policy_document_sections")
+      .insert(rows);
+
+    if (insertError) {
+      throw new Error(buildAuthDebugMessage(`reparse-document insert failed: ${insertError.message}`, session));
+    }
+  }
+
+  const { error: updateError } = await supabase
+    .from("policy_document_versions")
+    .update({
+      parse_warnings: parseResult.warnings,
+    })
+    .eq("id", version.id);
+
+  if (updateError) {
+    throw new Error(buildAuthDebugMessage(`reparse-document update failed: ${updateError.message}`, session));
+  }
+
+  return {
+    status: "success",
+    data: {
+      documentId: input.documentId,
+      versionId: version.id,
+      sectionCount: rows.length,
+      warningCount: parseResult.warnings.length,
+      reparsedBy: currentUser.id,
+    },
+  };
+}
+
 export async function listDocuments(): Promise<DocumentSummary[]> {
   await ensureAuthenticatedSession();
   const supabase = getSupabaseClient();
   const { data, error } = await supabase
     .from("policy_documents")
     .select(
-      "id, title, document_type, created_at, policy_document_versions(id, version_number, created_at, policy_document_sections(count))",
+      "id, title, document_type, created_at, policy_document_versions(id, version_number, created_at, raw_text, policy_document_sections(count))",
     )
     .order("created_at", { ascending: false });
 
@@ -84,6 +266,7 @@ export async function listDocuments(): Promise<DocumentSummary[]> {
     const latestVersion = [...(row.policy_document_versions ?? [])].sort(
       (left, right) => right.version_number - left.version_number,
     )[0];
+    const metadata = deriveDocumentMetadata(latestVersion?.raw_text ?? "");
 
     return {
       id: row.id,
@@ -92,6 +275,7 @@ export async function listDocuments(): Promise<DocumentSummary[]> {
       version_number: latestVersion?.version_number ?? 0,
       version_id: latestVersion?.id,
       created_at: latestVersion?.created_at ?? row.created_at,
+      effective_date: metadata.revisionDate,
       section_count: latestVersion?.policy_document_sections?.[0]?.count ?? 0,
     };
   });
@@ -102,20 +286,175 @@ export async function getDocumentDetail(
 ): Promise<DocumentDetail> {
   await ensureAuthenticatedSession();
   const supabase = getSupabaseClient();
-  const { data, error } = await supabase
-    .from("policy_document_details")
-    .select("*")
-    .eq("id", documentId)
-    .single();
+  const [detailResponse, versionResponse] = await Promise.all([
+    supabase
+      .from("policy_document_details")
+      .select("*")
+      .eq("id", documentId)
+      .single(),
+    supabase
+      .from("policy_document_versions")
+      .select("id")
+      .eq("document_id", documentId)
+      .order("version_number", { ascending: false })
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .single(),
+  ]);
 
-  if (error) {
-    throwAuthAwareError(error.message);
+  if (detailResponse.error) {
+    throwAuthAwareError(detailResponse.error.message);
   }
+
+  if (versionResponse.error) {
+    throwAuthAwareError(versionResponse.error.message);
+  }
+
+  const data = detailResponse.data;
+  const metadata = deriveDocumentMetadata(data.raw_text);
 
   return {
     ...data,
-    metadata: deriveDocumentMetadata(data.raw_text),
+    version_id: versionResponse.data?.id ?? undefined,
+    parse_warnings: filterDocumentParseWarnings(
+      Array.isArray(data.parse_warnings)
+        ? data.parse_warnings.filter((value: unknown): value is string => typeof value === "string")
+        : [],
+      metadata.title,
+    ),
+    metadata,
   };
+}
+
+export async function saveStructuredSections(input: {
+  documentId: string;
+  versionId: string;
+  rows: Array<{ content: string }>;
+  metadata?: {
+    title?: string | null;
+    revisionDate?: string | null;
+    documentNotes?: string[];
+  };
+}) {
+  const session = await ensureAuthenticatedSession();
+  const currentUser = await ensureAuthenticatedUser(session.access_token);
+  const supabase = getSupabaseClient();
+  const rebuiltRawText = buildStructuredDocumentRawText({
+    rows: input.rows,
+    metadata: input.metadata,
+  });
+
+  const parseResult = parsePolicyText(rebuiltRawText);
+  const hierarchyColumnsById = buildSectionHierarchyColumns(parseResult.sections);
+  const sectionRows = await Promise.all(parseResult.sections.map(async (section) => ({
+    id: section.tempId,
+    document_version_id: input.versionId,
+    parent_section_id: section.parentTempId,
+    hierarchy_type: section.hierarchyType,
+    hierarchy_label: section.hierarchyLabel,
+    hierarchy_order: section.hierarchyOrder,
+    normalized_text: section.normalizedText,
+    original_text: section.originalText,
+    text_hash: await sha256Hex(section.normalizedText),
+    path_display: section.path.join(" > "),
+    ...hierarchyColumnsById.get(section.tempId),
+  })));
+
+  const { error: deleteSectionsError } = await supabase
+    .from("policy_document_sections")
+    .delete()
+    .eq("document_version_id", input.versionId);
+
+  if (deleteSectionsError) {
+    throw new Error(buildAuthDebugMessage(`structured save delete failed: ${deleteSectionsError.message}`, session));
+  }
+
+  if (sectionRows.length > 0) {
+    const { error: insertSectionsError } = await supabase
+      .from("policy_document_sections")
+      .insert(sectionRows);
+
+    if (insertSectionsError) {
+      throw new Error(buildAuthDebugMessage(`structured save insert failed: ${insertSectionsError.message}`, session));
+    }
+  }
+
+  const { error: versionUpdateError } = await supabase
+    .from("policy_document_versions")
+    .update({
+      raw_text: rebuiltRawText,
+      parse_warnings: parseResult.warnings,
+    })
+    .eq("id", input.versionId);
+
+  if (versionUpdateError) {
+    throw new Error(buildAuthDebugMessage(`structured save version update failed: ${versionUpdateError.message}`, session));
+  }
+
+  await supabase.from("policy_audit_logs").insert({
+    actor_user_id: currentUser.id,
+    action: "DOCUMENT_RESTRUCTURED",
+    target_document_id: input.documentId,
+    result: "SUCCESS",
+    metadata: {
+      versionId: input.versionId,
+      sectionCount: sectionRows.length,
+      warningCount: parseResult.warnings.length,
+    },
+  });
+
+  return {
+    status: "success",
+    data: {
+      documentId: input.documentId,
+      versionId: input.versionId,
+      sectionCount: sectionRows.length,
+      warningCount: parseResult.warnings.length,
+    },
+  };
+}
+
+function buildStructuredDocumentRawText(input: {
+  rows: Array<{ content: string }>;
+  metadata?: {
+    title?: string | null;
+    revisionDate?: string | null;
+    documentNotes?: string[];
+  };
+}) {
+  const bodyLines = input.rows
+    .map((row) => row.content.trim())
+    .filter(Boolean);
+  const notes = Array.isArray(input.metadata?.documentNotes)
+    ? input.metadata?.documentNotes
+        .map((note) => note.trim())
+        .filter(Boolean)
+    : [];
+  const title = input.metadata?.title?.trim() || "";
+  const revisionDate = normalizeRevisionDateValue(input.metadata?.revisionDate ?? null);
+  const filteredNotes = notes.filter((note) => {
+    if (!note) {
+      return false;
+    }
+
+    if (title && note === title) {
+      return false;
+    }
+
+    if (/^개정\s*[0-9]{4}\.[0-9]{1,2}\.[0-9]{1,2}\.?$/u.test(note)) {
+      return false;
+    }
+
+    return true;
+  });
+
+  const headerLines = [
+    title || null,
+    revisionDate ? `개정 ${revisionDate}` : null,
+    ...filteredNotes,
+  ].filter((line): line is string => Boolean(line));
+
+  return [...headerLines, ...bodyLines].join("\n");
 }
 
 export async function listComparisonRuns(): Promise<ComparisonRunSummary[]> {
@@ -234,9 +573,12 @@ export async function getLawDetail(
     version_label: versionResponse.data.version_label,
     effective_date: versionResponse.data.effective_date,
     raw_text: versionResponse.data.raw_text,
-    parse_warnings: Array.isArray(versionResponse.data.parse_warnings)
-      ? versionResponse.data.parse_warnings.filter((value): value is string => typeof value === "string")
-      : [],
+    parse_warnings: filterLawParseWarnings(
+      Array.isArray(versionResponse.data.parse_warnings)
+        ? versionResponse.data.parse_warnings.filter((value): value is string => typeof value === "string")
+        : [],
+      lawSource?.source_title ?? null,
+    ),
     sections: (sectionResponse.data ?? []) as LawDetail["sections"],
   };
 }
@@ -323,6 +665,23 @@ export async function deleteLawSource(input: { lawVersionId: string }) {
     },
     {
       stage: "delete-law-source",
+      session,
+      userId: currentUser.id,
+    },
+  );
+}
+
+export async function reparseLawSource(input: { lawVersionId: string }) {
+  const session = await ensureAuthenticatedSession();
+  const currentUser = await ensureAuthenticatedUser(session.access_token);
+  return await invokeEdgeFunction(
+    "manage-law-source",
+    {
+      action: "reparse",
+      ...input,
+    },
+    {
+      stage: "reparse-law-source",
       session,
       userId: currentUser.id,
     },
@@ -490,7 +849,8 @@ export async function classifyRevision(comparisonRunId: string) {
 }
 
 export async function analyzeSelectedRevisions(input: {
-  documentIds: string[];
+  targetDocumentIds: string[];
+  referenceDocumentIds: string[];
   lawVersionIds: string[];
 }): Promise<AiRevisionGuidance> {
   const session = await ensureAuthenticatedSession();
@@ -503,57 +863,172 @@ export async function analyzeSelectedRevisions(input: {
   return normalizeAiRevisionGuidance(payload.data);
 }
 
+export async function analyzeSelectedRevisionsStage(input: {
+  stage: AiRevisionAnalysisStage;
+  targetDocumentIds: string[];
+  referenceDocumentIds: string[];
+  lawVersionIds: string[];
+  leftGroupReport?: unknown;
+  rightGroupReport?: unknown;
+}): Promise<AiRevisionStageResult> {
+  const session = await ensureAuthenticatedSession();
+  const currentUser = await ensureAuthenticatedUser(session.access_token);
+  const payload = await invokeEdgeFunction("analyze-selected-revisions", input, {
+    stage: `analyze-selected-revisions-${input.stage}`,
+    session,
+    userId: currentUser.id,
+  });
+
+  return normalizeAiRevisionStageResult(payload.data);
+}
+
 function normalizeAiRevisionGuidance(input: unknown): AiRevisionGuidance {
   const source = (input && typeof input === "object" ? input : {}) as Record<string, unknown>;
-  const normalizeItem = (value: unknown) => {
-    const item = (value && typeof value === "object" ? value : {}) as Record<string, unknown>;
+  const normalizeStringArray = (value: unknown) =>
+    Array.isArray(value)
+      ? value.filter((entry): entry is string => typeof entry === "string")
+      : [];
+  const normalizeGroupReport = (value: unknown) => {
+    const group = (value && typeof value === "object" ? value : {}) as Record<string, unknown>;
     return {
-      document_id: typeof item.document_id === "string" ? item.document_id : "",
-      document_title: typeof item.document_title === "string" ? item.document_title : "정책/지침",
-      target_section_path:
-        typeof item.target_section_path === "string" ? item.target_section_path : "미지정",
-      law_title: typeof item.law_title === "string" ? item.law_title : "법령",
-      policy_evidence_paths: Array.isArray(item.policy_evidence_paths)
-        ? item.policy_evidence_paths.filter((entry): entry is string => typeof entry === "string")
+      summary: typeof group.summary === "string" ? group.summary : "리포트 요약이 없습니다.",
+      key_findings: normalizeStringArray(group.key_findings),
+      documents: Array.isArray(group.documents)
+        ? group.documents.map((entry) => {
+            const item = (entry && typeof entry === "object" ? entry : {}) as Record<string, unknown>;
+            return {
+              document_id: typeof item.document_id === "string" ? item.document_id : "",
+              document_title:
+                typeof item.document_title === "string" ? item.document_title : "문서",
+              key_points: normalizeStringArray(item.key_points),
+              source_paths: normalizeStringArray(item.source_paths),
+            };
+          })
         : [],
-      law_evidence_paths: Array.isArray(item.law_evidence_paths)
-        ? item.law_evidence_paths.filter((entry): entry is string => typeof entry === "string")
+      merged_requirements: Array.isArray(group.merged_requirements)
+        ? group.merged_requirements.map((entry) => {
+            const item = (entry && typeof entry === "object" ? entry : {}) as Record<string, unknown>;
+            return {
+              topic: typeof item.topic === "string" ? item.topic : "항목",
+              detail: typeof item.detail === "string" ? item.detail : "",
+              source_titles: normalizeStringArray(item.source_titles),
+              source_paths: normalizeStringArray(item.source_paths),
+              notes: typeof item.notes === "string" ? item.notes : "",
+            };
+          })
         : [],
-      rationale: typeof item.rationale === "string" ? item.rationale : "",
-      confidence: typeof item.confidence === "number" ? item.confidence : 0,
-      suggested_action:
-        typeof item.suggested_action === "string" ? item.suggested_action : "",
+    };
+  };
+  const normalizeComparisonReport = (value: unknown) => {
+    const report = (value && typeof value === "object" ? value : {}) as Record<string, unknown>;
+    return {
+      summary: typeof report.summary === "string" ? report.summary : "비교 결과 요약이 없습니다.",
+      revision_needed:
+        typeof report.revision_needed === "boolean" ? report.revision_needed : false,
+      overall_comment:
+        typeof report.overall_comment === "string"
+          ? report.overall_comment
+          : "종합 의견이 없습니다.",
+      gaps: Array.isArray(report.gaps)
+        ? report.gaps.map((entry) => {
+            const item = (entry && typeof entry === "object" ? entry : {}) as Record<string, unknown>;
+            return {
+              topic: typeof item.topic === "string" ? item.topic : "항목",
+              gap_type: typeof item.gap_type === "string" ? item.gap_type : "missing",
+              right_requirement:
+                typeof item.right_requirement === "string" ? item.right_requirement : "",
+              left_current_state:
+                typeof item.left_current_state === "string" ? item.left_current_state : "",
+              risk: typeof item.risk === "string" ? item.risk : "",
+              target_document_id:
+                typeof item.target_document_id === "string" ? item.target_document_id : "",
+              target_document_title:
+                typeof item.target_document_title === "string"
+                  ? item.target_document_title
+                  : "정책/지침",
+              target_section_path:
+                typeof item.target_section_path === "string" ? item.target_section_path : "미지정",
+              recommended_revision:
+                typeof item.recommended_revision === "string"
+                  ? item.recommended_revision
+                  : "",
+              policy_evidence_paths: normalizeStringArray(item.policy_evidence_paths),
+              comparison_source_title:
+                typeof item.comparison_source_title === "string"
+                  ? item.comparison_source_title
+                  : "기준 문서",
+              comparison_evidence_paths: normalizeStringArray(item.comparison_evidence_paths),
+              confidence: typeof item.confidence === "number" ? item.confidence : 0,
+            };
+          })
+        : [],
+      well_covered_items: Array.isArray(report.well_covered_items)
+        ? report.well_covered_items.map((entry) => {
+            const item = (entry && typeof entry === "object" ? entry : {}) as Record<string, unknown>;
+            return {
+              topic: typeof item.topic === "string" ? item.topic : "항목",
+              reason: typeof item.reason === "string" ? item.reason : "",
+              policy_evidence_paths: normalizeStringArray(item.policy_evidence_paths),
+              comparison_evidence_paths: normalizeStringArray(item.comparison_evidence_paths),
+            };
+          })
+        : [],
+      document_actions: Array.isArray(report.document_actions)
+        ? report.document_actions.map((entry) => {
+            const item = (entry && typeof entry === "object" ? entry : {}) as Record<string, unknown>;
+            return {
+              document_id: typeof item.document_id === "string" ? item.document_id : "",
+              document_title:
+                typeof item.document_title === "string" ? item.document_title : "정책/지침",
+              actions: Array.isArray(item.actions)
+                ? item.actions.map((actionEntry) => {
+                    const action =
+                      actionEntry && typeof actionEntry === "object"
+                        ? (actionEntry as Record<string, unknown>)
+                        : {};
+                    return {
+                      target_section_path:
+                        typeof action.target_section_path === "string"
+                          ? action.target_section_path
+                          : "미지정",
+                      action: typeof action.action === "string" ? action.action : "수정",
+                      instruction:
+                        typeof action.instruction === "string" ? action.instruction : "",
+                    };
+                  })
+                : [],
+            };
+          })
+        : [],
+      low_confidence_notes: normalizeStringArray(report.low_confidence_notes),
+      remaining_watchpoints: normalizeStringArray(report.remaining_watchpoints),
     };
   };
 
   return {
-    summary: typeof source.summary === "string" ? source.summary : "AI 비교 결과 요약이 없습니다.",
-    revision_needed: typeof source.revision_needed === "boolean" ? source.revision_needed : false,
-    overall_comment:
-      typeof source.overall_comment === "string"
-        ? source.overall_comment
-        : "개정 필요 여부에 대한 종합 코멘트가 없습니다.",
-    why_revision_not_immediately_needed:
-      typeof source.why_revision_not_immediately_needed === "string"
-        ? source.why_revision_not_immediately_needed
-        : "즉시 개정 필요성이 낮은 이유에 대한 상세 설명이 없습니다.",
-    existing_policy_coverage: Array.isArray(source.existing_policy_coverage)
-      ? source.existing_policy_coverage.filter((entry): entry is string => typeof entry === "string")
-      : [],
-    remaining_watchpoints: Array.isArray(source.remaining_watchpoints)
-      ? source.remaining_watchpoints.filter((entry): entry is string => typeof entry === "string")
-      : [],
-    affected_documents: Array.isArray(source.affected_documents)
-      ? source.affected_documents.map(normalizeItem)
-      : [],
-    general_recommendations: Array.isArray(source.general_recommendations)
-      ? source.general_recommendations.filter((entry): entry is string => typeof entry === "string")
-      : [],
-    low_confidence_notes: Array.isArray(source.low_confidence_notes)
-      ? source.low_confidence_notes.filter((entry): entry is string => typeof entry === "string")
-      : [],
+    left_group_report: normalizeGroupReport(source.left_group_report),
+    right_group_report: normalizeGroupReport(source.right_group_report),
+    comparison_report: normalizeComparisonReport(source.comparison_report),
     model: typeof source.model === "string" ? source.model : null,
     api_call_count: typeof source.api_call_count === "number" ? source.api_call_count : 0,
+  };
+}
+
+function normalizeAiRevisionStageResult(input: unknown): AiRevisionStageResult {
+  const source = (input && typeof input === "object" ? input : {}) as Record<string, unknown>;
+  const normalized = normalizeAiRevisionGuidance(source);
+  const stage =
+    source.stage === "left" || source.stage === "right" || source.stage === "final"
+      ? source.stage
+      : "left";
+
+  return {
+    stage,
+    left_group_report: source.left_group_report ? normalized.left_group_report : null,
+    right_group_report: source.right_group_report ? normalized.right_group_report : null,
+    comparison_report: source.comparison_report ? normalized.comparison_report : null,
+    model: normalized.model,
+    api_call_count: normalized.api_call_count,
   };
 }
 
@@ -574,27 +1049,11 @@ async function ensureAuthenticatedSession() {
     throw new Error(buildAuthDebugMessage("사용자 정보가 없습니다.", session));
   }
 
-  const expiresAt = session.expires_at ?? 0;
-  const shouldRefresh = expiresAt * 1000 - Date.now() <= 60_000;
-
-  if (!shouldRefresh) {
-    return session;
+  if (isSessionExpiredOrNearExpiry(session)) {
+    return await forceRefreshAuthenticatedSession();
   }
 
-  const {
-    data: { session: refreshedSession },
-    error: refreshError,
-  } = await supabase.auth.refreshSession({
-    refresh_token: session.refresh_token,
-  });
-
-  if (refreshError || !refreshedSession) {
-    throw new Error(
-      buildAuthDebugMessage(refreshError?.message ?? "세션 갱신 실패", session),
-    );
-  }
-
-  return refreshedSession;
+  return session;
 }
 
 async function forceRefreshAuthenticatedSession() {
@@ -626,18 +1085,31 @@ async function forceRefreshAuthenticatedSession() {
 
 async function ensureAuthenticatedUser(accessToken: string) {
   const supabase = getSupabaseClient();
-  const {
-    data: { user },
-    error,
-  } = await supabase.auth.getUser(accessToken);
+  const resolveUser = async (token: string) => {
+    const {
+      data: { user },
+      error,
+    } = await supabase.auth.getUser(token);
 
-  if (error || !user) {
-    throw new Error(
-      buildAuthDebugMessage(error?.message ?? "사용자 검증 실패", null),
-    );
+    if (error || !user) {
+      throw new Error(
+        buildAuthDebugMessage(error?.message ?? "사용자 검증 실패", null),
+      );
+    }
+
+    return user;
+  };
+
+  try {
+    return await resolveUser(accessToken);
+  } catch (error) {
+    if (!(error instanceof Error) || !isJwtError(error.message)) {
+      throw error;
+    }
+
+    const refreshedSession = await forceRefreshAuthenticatedSession();
+    return await resolveUser(refreshedSession.access_token);
   }
-
-  return user;
 }
 
 async function invokeEdgeFunction<TBody extends Record<string, unknown>>(
@@ -655,24 +1127,113 @@ async function invokeEdgeFunction<TBody extends Record<string, unknown>>(
     userId?: string;
   },
 ) {
-  const supabase = getSupabaseClient();
-  let response = await supabase.functions.invoke(functionName, { body });
+  const session = await getFreshAuthenticatedSession();
+  let response = await invokeEdgeFunctionHttp(functionName, body, session.access_token);
 
-  if (response.error && isJwtError(response.error.message)) {
+  if (response.error && shouldRetryWithRefreshedSession(response.error)) {
     const refreshedSession = await forceRefreshAuthenticatedSession();
-    response = await supabase.functions.invoke(functionName, {
-      body,
-      headers: {
-        Authorization: `Bearer ${refreshedSession.access_token}`,
-      },
-    });
+    response = await invokeEdgeFunctionHttp(functionName, body, refreshedSession.access_token);
   }
 
   if (response.error) {
-    throw new Error(formatFunctionInvokeError(response.error, contextInfo));
+    throw new Error(await formatFunctionInvokeError(response.error, contextInfo));
   }
 
   return response.data;
+}
+
+async function invokeEdgeFunctionHttp<TBody extends Record<string, unknown>>(
+  functionName: string,
+  body: TBody,
+  accessToken: string,
+) {
+  const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+  const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
+
+  if (!supabaseUrl || !anonKey) {
+    return {
+      data: null,
+      error: new Error(
+        "Missing Supabase environment. Set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY.",
+      ),
+    };
+  }
+
+  const response = await fetch(`${supabaseUrl}/functions/v1/${functionName}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      apikey: anonKey,
+      Authorization: `Bearer ${accessToken}`,
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    const error = new Error(`Function request failed: ${response.status}`) as Error & {
+      context?: {
+        status?: number;
+        statusText?: string;
+        json?: () => Promise<unknown>;
+        text?: () => Promise<string>;
+      };
+    };
+    error.context = {
+      status: response.status,
+      statusText: response.statusText,
+      json: async () => await response.clone().json(),
+      text: async () => await response.clone().text(),
+    };
+
+    return {
+      data: null,
+      error,
+    };
+  }
+
+  const data = await response.json();
+  return {
+    data,
+    error: null,
+  };
+}
+
+async function getFreshAuthenticatedSession() {
+  const session = await ensureAuthenticatedSession();
+
+  if (!session.refresh_token) {
+    return session;
+  }
+
+  try {
+    return await forceRefreshAuthenticatedSession();
+  } catch (error) {
+    if (error instanceof Error && !isJwtError(error.message)) {
+      throw error;
+    }
+
+    const supabase = getSupabaseClient();
+    const {
+      data: { user },
+      error: userError,
+    } = await supabase.auth.getUser(session.access_token);
+
+    if (userError || !user) {
+      throw new Error(buildAuthDebugMessage(userError?.message ?? "사용자 검증 실패", session));
+    }
+
+    return session;
+  }
+}
+
+function isSessionExpiredOrNearExpiry(session: { expires_at?: number | null }) {
+  if (!session.expires_at) {
+    return false;
+  }
+
+  const currentEpochSeconds = Math.floor(Date.now() / 1000);
+  const refreshLeewaySeconds = 90;
+  return session.expires_at <= currentEpochSeconds + refreshLeewaySeconds;
 }
 
 async function encodeFileAsBase64(file: File) {
@@ -685,6 +1246,25 @@ async function encodeFileAsBase64(file: File) {
   }
 
   return btoa(binary);
+}
+
+function decodeBase64ToBytes(value: string) {
+  const binary = atob(value);
+  const bytes = new Uint8Array(binary.length);
+
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+
+  return bytes;
+}
+
+async function sha256Hex(value: string) {
+  const encoded = new TextEncoder().encode(value);
+  const digest = await crypto.subtle.digest("SHA-256", encoded);
+  return Array.from(new Uint8Array(digest))
+    .map((item) => item.toString(16).padStart(2, "0"))
+    .join("");
 }
 
 function guessContentType(fileName: string) {
@@ -703,6 +1283,46 @@ function guessContentType(fileName: string) {
   return "text/plain";
 }
 
+function inferClientDocumentType(input: {
+  inputTitle: string;
+  parsedTitle: string | null;
+  rawText: string;
+}) {
+  const candidate = [
+    input.inputTitle,
+    input.parsedTitle ?? "",
+    input.rawText.slice(0, 400),
+  ]
+    .join(" ")
+    .toLowerCase();
+
+  if (candidate.includes("지침") || candidate.includes("guideline")) {
+    return "GUIDELINE" as const;
+  }
+
+  return "POLICY" as const;
+}
+
+function buildClientStoragePath(userId: string, originalFileName: string) {
+  const extensionMatch = originalFileName.match(/(\.[a-z0-9]+)$/iu);
+  const extension = extensionMatch?.[1].toLowerCase() ?? "";
+  const baseName = extension
+    ? originalFileName.slice(0, -extension.length)
+    : originalFileName;
+  const normalizedBase = baseName
+    .normalize("NFKD")
+    .split("")
+    .filter((character) => character.charCodeAt(0) <= 0x7f)
+    .join("")
+    .replace(/[^a-zA-Z0-9._-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "")
+    .toLowerCase();
+  const safeBase = normalizedBase || "document";
+
+  return `${userId}/${crypto.randomUUID()}-${safeBase}${extension}`;
+}
+
 function buildAuthDebugMessage(message?: string, session?: { expires_at?: number } | null) {
   const normalizedMessage = message?.toLowerCase().includes("jwt")
     ? "Invalid JWT"
@@ -712,6 +1332,73 @@ function buildAuthDebugMessage(message?: string, session?: { expires_at?: number
     : "없음";
 
   return `인증 단계 실패\n원인: ${normalizedMessage}\n세션 만료 시각: ${expiresAt}`;
+}
+
+function filterLawParseWarnings(warnings: string[], sourceTitle: string | null) {
+  return warnings.filter((warning) => !isIgnorableLawTitleWarning(warning, sourceTitle));
+}
+
+function filterDocumentParseWarnings(warnings: string[], documentTitle: string | null) {
+  return [...new Set(warnings)].filter(
+    (warning) => !isIgnorableDocumentTopLevelWarning(warning, documentTitle),
+  );
+}
+
+function isIgnorableLawTitleWarning(warning: string, sourceTitle: string | null) {
+  const match = warning.match(/^Unmatched top-level text preserved as document-level content: "(.+)"$/u);
+  if (!match) {
+    return false;
+  }
+
+  const preservedText = normalizeWarningText(match[1]);
+  const normalizedSourceTitle = normalizeWarningText(sourceTitle ?? "");
+
+  if (normalizedSourceTitle && preservedText === normalizedSourceTitle) {
+    return true;
+  }
+
+  return /(?:법률|시행령|시행규칙|규정|지침|기준|고시|훈령|예규|조례|규칙)$/u.test(preservedText);
+}
+
+function isIgnorableDocumentTopLevelWarning(warning: string, documentTitle: string | null) {
+  const match = warning.match(/^Unmatched top-level text preserved as document-level content: "(.+)"$/u);
+  if (!match) {
+    return false;
+  }
+
+  const preservedText = normalizeWarningText(match[1]);
+  const normalizedTitle = normalizeWarningText(documentTitle ?? "");
+  const compactPreservedText = compactKoreanHeadingText(preservedText);
+  const compactTitle = compactKoreanHeadingText(normalizedTitle);
+
+  if (
+    (normalizedTitle && preservedText === normalizedTitle) ||
+    (compactTitle && compactPreservedText === compactTitle)
+  ) {
+    return true;
+  }
+
+  if (/^(?:개정|제정|시행)\s*[0-9]{4}(?:\.[0-9]{1,2}){1,2}\.?$/u.test(preservedText)) {
+    return true;
+  }
+
+  if (/^(?:부칙|목적|적용범위|시행일)$/u.test(preservedText)) {
+    return true;
+  }
+
+  if (/^(?:[0-9]+[.)]?|[①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳]|[가-힣A-Za-z]\.)$/u.test(preservedText)) {
+    return true;
+  }
+
+  return /(?:정책|지침|규정|기준|매뉴얼|계획|법률|시행령|시행규칙)$/u.test(preservedText);
+}
+
+function normalizeWarningText(value: string) {
+  return value.replace(/\s+/gu, " ").trim();
+}
+
+function compactKoreanHeadingText(value: string) {
+  return value.replace(/\s+/gu, "");
 }
 
 function buildDebugPrefix(
@@ -734,7 +1421,7 @@ function buildDebugPrefix(
   const userId = contextInfo?.userId ?? contextInfo?.session?.user?.id ?? "없음";
 
   return [
-    "업로드 디버그 정보",
+    "작업 디버그 정보",
     `단계: ${contextInfo?.stage ?? "unknown"}`,
     `파일: ${contextInfo?.fileName ?? "unknown"}`,
     `사용자 ID: ${userId}`,
@@ -743,8 +1430,15 @@ function buildDebugPrefix(
   ].join("\n");
 }
 
-function formatFunctionInvokeError(
-  error: Error,
+async function formatFunctionInvokeError(
+  error: Error & {
+    context?: {
+      status?: number;
+      statusText?: string;
+      json?: () => Promise<unknown>;
+      text?: () => Promise<string>;
+    };
+  },
   contextInfo?: {
     stage: string;
     fileName?: string;
@@ -757,12 +1451,50 @@ function formatFunctionInvokeError(
     userId?: string;
   },
 ) {
-  return buildDebugPrefix(error.message || "함수 호출 중 오류가 발생했습니다.", contextInfo);
+  const statusMessage = error.context?.status
+    ? `HTTP ${error.context.status} ${error.context.statusText ?? ""}`.trim()
+    : error.message || "함수 호출 중 오류가 발생했습니다.";
+  const debugPrefix = buildDebugPrefix(statusMessage, contextInfo);
+
+  if (!error.context) {
+    return debugPrefix;
+  }
+
+  try {
+    const payload = await error.context.json?.();
+    if (payload) {
+      return `${debugPrefix}\n서버 응답: ${JSON.stringify(payload)}`;
+    }
+  } catch {
+    // Fall through to plain text extraction.
+  }
+
+  try {
+    const text = await error.context.text?.();
+    if (text) {
+      return `${debugPrefix}\n서버 응답: ${text}`;
+    }
+  } catch {
+    // Ignore and return the prefix only.
+  }
+
+  return debugPrefix;
 }
 
 function isJwtError(message?: string) {
   return Boolean(message?.toLowerCase().includes("jwt"));
 }
+
+function shouldRetryWithRefreshedSession(
+  error: Error & {
+    context?: {
+      status?: number;
+    };
+  },
+) {
+  return error.context?.status === 401 || isJwtError(error.message);
+}
+
 
 function deriveDocumentMetadata(rawText: string) {
   const lines = rawText
@@ -801,6 +1533,15 @@ function deriveDocumentMetadata(rawText: string) {
     revisionDate,
     documentNotes,
   };
+}
+
+function normalizeRevisionDateValue(value: string | null) {
+  if (!value) {
+    return null;
+  }
+
+  const trimmed = value.trim().replace(/^개정\s*/u, "").replace(/\.$/u, "");
+  return trimmed || null;
 }
 
 function throwAuthAwareError(message?: string): never {

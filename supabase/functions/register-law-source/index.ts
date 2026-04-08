@@ -29,7 +29,9 @@ Deno.serve(async (request) => {
     return new Response("ok", { headers: corsHeaders });
   }
 
+  let failureStage = "request";
   try {
+    failureStage = "auth-header";
     const authHeader = request.headers.get("Authorization");
     const accessToken = extractBearerToken(authHeader);
 
@@ -37,6 +39,7 @@ Deno.serve(async (request) => {
       return json({ error: "Missing authorization token." }, 401);
     }
 
+    failureStage = "env";
     const supabaseUrl = Deno.env.get("SUPABASE_URL");
     const anonKey = Deno.env.get("SUPABASE_ANON_KEY");
     const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
@@ -45,6 +48,7 @@ Deno.serve(async (request) => {
       return json({ error: "Missing Supabase environment." }, 500);
     }
 
+    failureStage = "auth-user";
     const authClient = createClient(supabaseUrl, anonKey);
     const {
       data: { user },
@@ -55,15 +59,20 @@ Deno.serve(async (request) => {
       return json({ error: userError?.message ?? "Unauthorized." }, 401);
     }
 
+    failureStage = "request-body";
     const body = (await request.json()) as RegisterLawSourceRequest;
+    failureStage = "validate-input";
     validateInput(body);
     const supabase = createClient(supabaseUrl, serviceRoleKey);
     const sourceType = body.sourceType === "file" ? "file" : "url";
+    failureStage = sourceType === "file" ? "extract-upload" : "extract-url";
     const extracted = sourceType === "file"
       ? await extractLawTextFromUpload(supabase, user.id, body)
       : await extractLawTextFromUrl(body);
+    failureStage = "parse";
     const parseResult = parsePolicyText(extracted.rawText);
 
+    failureStage = "insert-law-source";
     const { data: lawSource, error: lawSourceError } = await supabase
       .from("policy_law_sources")
       .insert({
@@ -80,6 +89,7 @@ Deno.serve(async (request) => {
       throw lawSourceError ?? new Error("Failed to create law source.");
     }
 
+    failureStage = "insert-law-version";
     const { data: lawVersion, error: lawVersionError } = await supabase
       .from("policy_law_versions")
       .insert({
@@ -96,6 +106,7 @@ Deno.serve(async (request) => {
       throw lawVersionError ?? new Error("Failed to create law version.");
     }
 
+    failureStage = "build-sections";
     const hierarchyColumnsById = buildSectionHierarchyColumns(parseResult.sections);
     const sections = await Promise.all(
       parseResult.sections.map(async (section) => ({
@@ -114,6 +125,7 @@ Deno.serve(async (request) => {
     );
 
     if (sections.length > 0) {
+      failureStage = "insert-sections";
       const { error: sectionError } = await supabase
         .from("policy_law_sections")
         .insert(sections);
@@ -123,6 +135,7 @@ Deno.serve(async (request) => {
       }
     }
 
+    failureStage = "audit-log";
     const { error: auditError } = await supabase.from("policy_audit_logs").insert({
       actor_user_id: user.id,
       action: "LAW_SOURCE_REGISTERED",
@@ -160,7 +173,8 @@ Deno.serve(async (request) => {
     return json(
       {
         status: "error",
-        error: error instanceof Error ? error.message : "Unknown error",
+        stage: failureStage,
+        error: serializeError(error),
       },
       400,
     );
@@ -453,4 +467,20 @@ function json(data: unknown, status = 200) {
       "Content-Type": "application/json",
     },
   });
+}
+
+function serializeError(error: unknown) {
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  if (typeof error === "string") {
+    return error;
+  }
+
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return "Unknown error";
+  }
 }

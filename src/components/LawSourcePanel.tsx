@@ -1,190 +1,107 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { DocumentSummary, LawVersionSummary } from "../types";
+
+type WorkspaceFavoriteOption = {
+  id: string;
+  name: string;
+  updatedAt: string;
+};
 
 interface LawSourcePanelProps {
   documents: DocumentSummary[];
-  selectedDocumentCount: number;
+  targetDocumentIds: string[];
+  referenceDocumentIds: string[];
+  draggingDocumentId: string | null;
   lawVersions: LawVersionSummary[];
   selectedLawVersionIds: string[];
   disabled: boolean;
-  onToggleLawVersion: (lawVersionId: string) => void;
-  onRegisterLawSource: (input: {
-    sourceLink: string;
-    sourceTitle: string;
-    versionLabel: string;
-    effectiveDate: string;
-  }) => Promise<void>;
-  onUploadLawDocument: (input: {
-    file: File;
-    sourceTitle: string;
-    versionLabel: string;
-    effectiveDate: string;
-  }) => Promise<void>;
-  onUpdateLawSource: (input: {
-    lawVersionId: string;
-    sourceLink: string;
-    sourceTitle: string;
-    versionLabel: string;
-    effectiveDate: string;
-  }) => Promise<void>;
+  disabledReason?: string | null;
+  onAddLawVersion: (lawVersionId: string) => void;
+  onRemoveLawVersion: (lawVersionId: string) => void;
+  onDropTargetDocument: (documentId: string) => void;
+  onRemoveTargetDocument: (documentId: string) => void;
+  onDropReferenceDocument: (documentId: string) => void;
+  onRemoveReferenceDocument: (documentId: string) => void;
   onDeleteLawSource: (lawVersionId: string) => Promise<void>;
+  onReparseLawSource: (lawVersionId: string) => Promise<void>;
   onRunComparison: () => Promise<void>;
+  favorites: WorkspaceFavoriteOption[];
+  activeFavoriteId: string | null;
+  onSaveFavorite: () => void;
+  onApplyFavorite: (favoriteId: string) => void;
+  onDeleteFavorite: (favoriteId: string) => void;
 }
+
+const POLICY_DRAG_PREFIX = "policy-document:";
+const LAW_DRAG_PREFIX = "law-version:";
 
 export function LawSourcePanel({
   documents,
-  selectedDocumentCount,
+  targetDocumentIds,
+  referenceDocumentIds,
+  draggingDocumentId,
   lawVersions,
   selectedLawVersionIds,
   disabled,
-  onToggleLawVersion,
-  onRegisterLawSource,
-  onUploadLawDocument,
-  onUpdateLawSource,
+  disabledReason = null,
+  onAddLawVersion,
+  onRemoveLawVersion,
+  onDropTargetDocument,
+  onRemoveTargetDocument,
+  onDropReferenceDocument,
+  onRemoveReferenceDocument,
   onDeleteLawSource,
+  onReparseLawSource,
   onRunComparison,
+  favorites,
+  activeFavoriteId,
+  onSaveFavorite,
+  onApplyFavorite,
+  onDeleteFavorite,
 }: LawSourcePanelProps) {
-  const [urlSourceLink, setUrlSourceLink] = useState("");
-  const [urlSourceTitle, setUrlSourceTitle] = useState("");
-  const [urlVersionLabel, setUrlVersionLabel] = useState("");
-  const [urlEffectiveDate, setUrlEffectiveDate] = useState("");
-  const [fileSourceTitle, setFileSourceTitle] = useState("");
-  const [fileVersionLabel, setFileVersionLabel] = useState("");
-  const [fileEffectiveDate, setFileEffectiveDate] = useState("");
-  const [sourceFile, setSourceFile] = useState<File | null>(null);
-  const [sourceLink, setSourceLink] = useState("");
-  const [sourceTitle, setSourceTitle] = useState("");
-  const [versionLabel, setVersionLabel] = useState("");
-  const [effectiveDate, setEffectiveDate] = useState("");
-  const [isRegistering, setIsRegistering] = useState(false);
   const [isComparing, setIsComparing] = useState(false);
-  const [editingLawVersionId, setEditingLawVersionId] = useState<string | null>(null);
   const [isMutatingLawVersionId, setIsMutatingLawVersionId] = useState<string | null>(null);
-  const [selectedRegistrationType, setSelectedRegistrationType] = useState<"url" | "file" | null>(
-    null,
+  const [draggingPolicyDocumentId, setDraggingPolicyDocumentId] = useState<string | null>(null);
+  const [isTargetDropActive, setIsTargetDropActive] = useState(false);
+  const [isReferenceDropActive, setIsReferenceDropActive] = useState(false);
+  const [draggingLawVersionId, setDraggingLawVersionId] = useState<string | null>(null);
+  const [selectedFavoriteId, setSelectedFavoriteId] = useState<string>("");
+  const lawDropZoneRef = useRef<HTMLDivElement | null>(null);
+
+  const targetDocuments = documents.filter((document) => targetDocumentIds.includes(document.id));
+  const referenceDocuments = documents.filter((document) => referenceDocumentIds.includes(document.id));
+  const selectedLawVersions = lawVersions.filter((lawVersion) =>
+    selectedLawVersionIds.includes(lawVersion.id),
   );
-  const urlLawVersions = lawVersions.filter(
-    (lawVersion) => getLawSourceType(lawVersion.source_link) === "url",
+  const availableLawVersions = lawVersions.filter(
+    (lawVersion) => !selectedLawVersionIds.includes(lawVersion.id),
   );
-  const fileLawVersions = lawVersions.filter(
-    (lawVersion) => getLawSourceType(lawVersion.source_link) === "file",
-  );
-  const selectedSourceType = lawVersions
-    .filter((lawVersion) => selectedLawVersionIds.includes(lawVersion.id))
-    .map((lawVersion) => getLawSourceType(lawVersion.source_link))[0] ?? null;
-  const isUrlBlockDisabled =
-    disabled || isRegistering || selectedRegistrationType === "file";
-  const isFileBlockDisabled =
-    disabled || isRegistering || selectedRegistrationType === "url";
-  const isUrlRegistrationDisabled =
-    isUrlBlockDisabled;
-  const isFileRegistrationDisabled =
-    isFileBlockDisabled;
+  const rightGroupCount = referenceDocuments.length + selectedLawVersions.length;
+  const comparisonBlockingReason = getComparisonBlockingReason({
+    disabled,
+    disabledReason,
+    targetCount: targetDocuments.length,
+    rightGroupCount,
+  });
 
-  async function handleEditRegister(event: React.FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    setIsRegistering(true);
-
-    try {
-      if (!editingLawVersionId) {
-        return;
-      }
-
-      await onUpdateLawSource({
-        lawVersionId: editingLawVersionId,
-        sourceLink,
-        sourceTitle,
-        versionLabel,
-        effectiveDate,
-      });
-
-      setSourceLink("");
-      setSourceTitle("");
-      setVersionLabel("");
-      setEffectiveDate("");
-      setEditingLawVersionId(null);
-    } finally {
-      setIsRegistering(false);
-    }
-  }
-
-  async function handleUrlRegister(event: React.FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    setSelectedRegistrationType("url");
-    setIsRegistering(true);
-
-    try {
-      await onRegisterLawSource({
-        sourceLink: urlSourceLink,
-        sourceTitle: urlSourceTitle,
-        versionLabel: urlVersionLabel,
-        effectiveDate: urlEffectiveDate,
-      });
-      setUrlSourceLink("");
-      setUrlSourceTitle("");
-      setUrlVersionLabel("");
-      setUrlEffectiveDate("");
-    } finally {
-      setIsRegistering(false);
-    }
-  }
-
-  async function handleFileRegister(event: React.FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    setSelectedRegistrationType("file");
-    const form = event.currentTarget;
-    if (!sourceFile) {
+  useEffect(() => {
+    if (activeFavoriteId && favorites.some((favorite) => favorite.id === activeFavoriteId)) {
+      setSelectedFavoriteId(activeFavoriteId);
       return;
     }
 
-    setIsRegistering(true);
-
-    try {
-      await onUploadLawDocument({
-        file: sourceFile,
-        sourceTitle: fileSourceTitle,
-        versionLabel: fileVersionLabel,
-        effectiveDate: fileEffectiveDate,
-      });
-      setSourceFile(null);
-      setFileSourceTitle("");
-      setFileVersionLabel("");
-      setFileEffectiveDate("");
-      const fileInput = form.elements.namedItem("law-file") as HTMLInputElement | null;
-      if (fileInput) {
-        fileInput.value = "";
-      }
-    } finally {
-      setIsRegistering(false);
-    }
-  }
+    setSelectedFavoriteId((current) =>
+      current && favorites.some((favorite) => favorite.id === current) ? current : "",
+    );
+  }, [activeFavoriteId, favorites]);
 
   async function handleRunComparison() {
     setIsComparing(true);
-
     try {
       await onRunComparison();
     } finally {
       setIsComparing(false);
     }
-  }
-
-  function handleStartEdit(lawVersion: LawVersionSummary) {
-    setEditingLawVersionId(lawVersion.id);
-    setSourceLink(lawVersion.source_link);
-    setSourceTitle(lawVersion.source_title ?? "");
-    setVersionLabel(lawVersion.version_label ?? "");
-    setEffectiveDate(lawVersion.effective_date ?? "");
-    setSourceFile(null);
-  }
-
-  function handleCancelEdit() {
-    setEditingLawVersionId(null);
-    setSourceLink("");
-    setSourceTitle("");
-    setVersionLabel("");
-    setEffectiveDate("");
-      setSourceFile(null);
   }
 
   async function handleDelete(lawVersionId: string) {
@@ -196,251 +113,461 @@ export function LawSourcePanel({
     }
   }
 
+  async function handleReparse(lawVersionId: string) {
+    setIsMutatingLawVersionId(lawVersionId);
+    try {
+      await onReparseLawSource(lawVersionId);
+    } finally {
+      setIsMutatingLawVersionId(null);
+    }
+  }
+
+  function extractPolicyDocumentId(event: React.DragEvent<HTMLElement>) {
+    const explicit = event.dataTransfer.getData("application/x-policy-document-id");
+    if (explicit) {
+      return explicit;
+    }
+
+    const plainText = event.dataTransfer.getData("text/plain");
+    return plainText.startsWith(POLICY_DRAG_PREFIX)
+      ? plainText.slice(POLICY_DRAG_PREFIX.length)
+      : "";
+  }
+
+  function extractLawVersionId(event: React.DragEvent<HTMLElement>) {
+    const explicit = event.dataTransfer.getData("application/x-law-version-id");
+    if (explicit) {
+      return explicit;
+    }
+
+    const plainText = event.dataTransfer.getData("text/plain");
+    if (plainText.startsWith(LAW_DRAG_PREFIX)) {
+      return plainText.slice(LAW_DRAG_PREFIX.length);
+    }
+
+    return "";
+  }
+
+  function hasPolicyDragPayload(event: React.DragEvent<HTMLElement>) {
+    const types = Array.from(event.dataTransfer.types ?? []);
+    return (
+      types.includes("application/x-policy-document-id") ||
+      types.includes("text/plain") ||
+      extractPolicyDocumentId(event).length > 0 ||
+      draggingPolicyDocumentId !== null ||
+      draggingDocumentId !== null
+    );
+  }
+
+  function hasLawDragPayload(event: React.DragEvent<HTMLElement>) {
+    const types = Array.from(event.dataTransfer.types ?? []);
+    return (
+      types.includes("application/x-law-version-id") ||
+      types.includes("text/plain") ||
+      extractLawVersionId(event).length > 0 ||
+      draggingLawVersionId !== null
+    );
+  }
+
+  function handlePolicyDragStart(
+    event: React.DragEvent<HTMLElement>,
+    documentId: string,
+  ) {
+    setDraggingPolicyDocumentId(documentId);
+    event.dataTransfer.clearData();
+    event.dataTransfer.setData("application/x-policy-document-id", documentId);
+    event.dataTransfer.setData("text/plain", `${POLICY_DRAG_PREFIX}${documentId}`);
+    event.dataTransfer.effectAllowed = "copyMove";
+  }
+
+  function handleLawDragStart(
+    event: React.DragEvent<HTMLElement>,
+    lawVersionId: string,
+  ) {
+    setDraggingLawVersionId(lawVersionId);
+    event.dataTransfer.clearData();
+    event.dataTransfer.setData("application/x-law-version-id", lawVersionId);
+    event.dataTransfer.setData("text/plain", `${LAW_DRAG_PREFIX}${lawVersionId}`);
+    event.dataTransfer.effectAllowed = "move";
+  }
+
+  function handleLawDragEnd(event: React.DragEvent<HTMLElement>) {
+    if (!draggingLawVersionId || selectedLawVersionIds.includes(draggingLawVersionId)) {
+      setDraggingLawVersionId(null);
+      return;
+    }
+
+    const rect = lawDropZoneRef.current?.getBoundingClientRect();
+    if (rect) {
+      const isInsideDropZone =
+        event.clientX >= rect.left &&
+        event.clientX <= rect.right &&
+        event.clientY >= rect.top &&
+        event.clientY <= rect.bottom;
+
+      if (isInsideDropZone) {
+        onAddLawVersion(draggingLawVersionId);
+      }
+    }
+
+    setDraggingLawVersionId(null);
+  }
+
+  function handlePolicyDrop(event: React.DragEvent<HTMLDivElement>) {
+    event.preventDefault();
+    event.stopPropagation();
+    const documentId =
+      extractPolicyDocumentId(event) ||
+      draggingPolicyDocumentId ||
+      draggingDocumentId ||
+      "";
+    if (!documentId) {
+      return;
+    }
+
+    onDropTargetDocument(documentId);
+    setDraggingPolicyDocumentId(null);
+    setIsTargetDropActive(false);
+  }
+
+  function handleReferencePolicyDrop(event: React.DragEvent<HTMLDivElement>) {
+    event.preventDefault();
+    event.stopPropagation();
+    const documentId =
+      extractPolicyDocumentId(event) ||
+      draggingPolicyDocumentId ||
+      draggingDocumentId ||
+      "";
+    if (!documentId) {
+      return;
+    }
+
+    onDropReferenceDocument(documentId);
+    setDraggingPolicyDocumentId(null);
+    setIsReferenceDropActive(false);
+  }
+
+  function handleLawDrop(event: React.DragEvent<HTMLDivElement>) {
+    event.preventDefault();
+    event.stopPropagation();
+    const lawVersionId = extractLawVersionId(event) || draggingLawVersionId || "";
+    if (!lawVersionId || selectedLawVersionIds.includes(lawVersionId)) {
+      setDraggingLawVersionId(null);
+      return;
+    }
+
+    onAddLawVersion(lawVersionId);
+    setDraggingLawVersionId(null);
+    setIsReferenceDropActive(false);
+  }
+
+  function handleDragCancel() {
+    setDraggingPolicyDocumentId(null);
+    setDraggingLawVersionId(null);
+    setIsTargetDropActive(false);
+    setIsReferenceDropActive(false);
+  }
+
   return (
     <div className="stack">
-      {editingLawVersionId ? (
-        <form className="stack" onSubmit={handleEditRegister}>
-          <div className="info-card">
-            <span className="muted-label">법령 수정</span>
-            <strong>기존 등록 항목 수정</strong>
-            <p className="helper-text">수정은 URL 기반 메타데이터 방식으로 저장합니다.</p>
-          </div>
-          <label className="field">
-            <span>법령 URL</span>
-            <input
-              value={sourceLink}
-              onChange={(event) => setSourceLink(event.target.value)}
-              placeholder="https://www.law.go.kr/..."
-              disabled={disabled || isRegistering}
-            />
-          </label>
-          <label className="field">
-            <span>표시 제목</span>
-            <input
-              value={sourceTitle}
-              onChange={(event) => setSourceTitle(event.target.value)}
-              placeholder="예: 개인정보보호법"
-              disabled={disabled || isRegistering}
-            />
-          </label>
-          <div className="inline-fields">
-            <label className="field">
-              <span>버전 라벨</span>
-              <input
-                value={versionLabel}
-                onChange={(event) => setVersionLabel(event.target.value)}
-                placeholder="예: 2026-04 개정"
-                disabled={disabled || isRegistering}
-              />
-            </label>
-            <label className="field">
-              <span>시행일</span>
-              <input
-                type="date"
-                value={effectiveDate}
-                onChange={(event) => setEffectiveDate(event.target.value)}
-                disabled={disabled || isRegistering}
-              />
-            </label>
-          </div>
-          <div className="inline-fields form-action-row">
-            <button className="button" type="submit" disabled={disabled || isRegistering}>
-              {isRegistering ? "법령 수정 중..." : "법령 수정 저장"}
-            </button>
-            <button
-              className="button ghost"
-              type="button"
-              disabled={disabled || isRegistering}
-              onClick={handleCancelEdit}
-            >
-              {editingLawVersionId ? "수정 취소" : "등록 취소"}
-            </button>
-          </div>
-        </form>
+      <div className="info-card detail-card favorite-toolbar">
+        <div className="favorite-toolbar-copy">
+          <strong>배치 즐겨찾기</strong>
+          <p className="helper-text">
+            현재 좌우 문서 배치와 기준 법률 선택을 이름으로 저장하고 다시 불러옵니다.
+          </p>
+        </div>
+        <div className="favorite-toolbar-controls">
+          <select
+            className="favorite-select"
+            value={selectedFavoriteId}
+            onChange={(event) => setSelectedFavoriteId(event.target.value)}
+            disabled={favorites.length === 0}
+          >
+            <option value="">저장된 즐겨찾기 선택</option>
+            {favorites.map((favorite) => (
+              <option key={favorite.id} value={favorite.id}>
+                {favorite.name}
+              </option>
+            ))}
+          </select>
+          <button type="button" className="button ghost select-button" onClick={onSaveFavorite}>
+            현재 배치 저장
+          </button>
+          <button
+            type="button"
+            className="button ghost select-button"
+            disabled={!selectedFavoriteId}
+            onClick={() => onApplyFavorite(selectedFavoriteId)}
+          >
+            불러오기
+          </button>
+          <button
+            type="button"
+            className="button ghost select-button"
+            disabled={!selectedFavoriteId}
+            onClick={() => onDeleteFavorite(selectedFavoriteId)}
+          >
+            삭제
+          </button>
+        </div>
+      </div>
+      <div className="info-card detail-card">
+        <strong>비교 플로우 안내</strong>
+        <ul className="plain-list">
+          <li>좌측 그룹에는 개정 여부를 검토할 정책·지침을 넣습니다.</li>
+          <li>우측 그룹에는 비교 기준이 되는 문서나 법령을 넣습니다.</li>
+          <li>법령은 아래 목록에서 끌어오거나, 이미 선택된 항목을 재파싱할 수 있습니다.</li>
+        </ul>
+      </div>
+      {comparisonBlockingReason ? (
+        <div className="warning-card detail-card">
+          <strong>지금은 비교를 실행할 수 없습니다.</strong>
+          <p className="helper-text detailed-empty-reason">{comparisonBlockingReason}</p>
+        </div>
       ) : (
-        <>
-          <div className="selection-summary-card">
-            <span className="muted-label">비교 대상 문서</span>
-            <strong>{selectedDocumentCount}건 선택됨</strong>
-            <p className="helper-text">
-              선택된 정책·지침만 비교합니다. 전체 등록 문서 {documents.length}건
-            </p>
-          </div>
-
-          <div className="registration-columns">
-          <form className={`registration-card ${selectedRegistrationType === "url" ? "active" : ""} ${isUrlBlockDisabled && selectedRegistrationType !== "url" ? "disabled" : ""}`} onSubmit={handleUrlRegister}>
-            <button
-              type="button"
-              className="registration-card-header registration-card-header-button"
-              disabled={disabled || isRegistering}
-              onClick={() =>
-                setSelectedRegistrationType((current) => (current === "url" ? null : "url"))
-              }
-            >
-              <span className="registration-launch-label">URL 등록</span>
-              <strong>법령 URL로 본문 수집</strong>
-              <p className="helper-text">
-                law.go.kr 등 허용된 주소에서 원문을 가져와 구조화합니다.
-              </p>
-            </button>
-            <fieldset className="registration-card-fields" disabled={isUrlRegistrationDisabled}>
-            <label className="field">
-              <span>법령 URL</span>
-              <input
-                value={urlSourceLink}
-                onChange={(event) => setUrlSourceLink(event.target.value)}
-                placeholder="https://www.law.go.kr/..."
-                disabled={isUrlRegistrationDisabled}
-              />
-            </label>
-            <label className="field">
-              <span>표시 제목</span>
-              <input
-                value={urlSourceTitle}
-                onChange={(event) => setUrlSourceTitle(event.target.value)}
-                placeholder="예: 개인정보보호법"
-                disabled={isUrlRegistrationDisabled}
-              />
-            </label>
-            <div className="inline-fields">
-              <label className="field">
-                <span>버전 라벨</span>
-                <input
-                  value={urlVersionLabel}
-                  onChange={(event) => setUrlVersionLabel(event.target.value)}
-                  placeholder="예: 2026-04 개정"
-                  disabled={isUrlRegistrationDisabled}
-                />
-              </label>
-              <label className="field">
-                <span>시행일</span>
-                <input
-                  type="date"
-                  value={urlEffectiveDate}
-                  onChange={(event) => setUrlEffectiveDate(event.target.value)}
-                  disabled={isUrlRegistrationDisabled}
-                />
-              </label>
-            </div>
-            <button className="button" type="submit" disabled={isUrlRegistrationDisabled}>
-              {isRegistering ? "법령 등록 중..." : "법령 URL 등록"}
-            </button>
-            </fieldset>
-
-            <div className="stack">
-              <div className="info-card">
-                <strong className="law-count-label">{`현재 등록된 URL: ${urlLawVersions.length}건`}</strong>
-              </div>
-              {urlLawVersions.length === 0 ? (
-                <div className="empty-state compact-empty-state">
-                  <strong>등록된 URL 법령이 없습니다.</strong>
-                </div>
-              ) : (
-                <div className="list law-list">
-                  {urlLawVersions.map((lawVersion) => renderLawVersionItem({
-                    lawVersion,
-                    selectedLawVersionIds,
-                    selectedSourceType,
-                    disabled,
-                    isRegistering,
-                    isMutatingLawVersionId,
-                    onToggleLawVersion,
-                    onStartEdit: handleStartEdit,
-                    onDelete: handleDelete,
-                  }))}
-                </div>
-              )}
-            </div>
-          </form>
-
-          <form className={`registration-card ${selectedRegistrationType === "file" ? "active" : ""} ${isFileBlockDisabled && selectedRegistrationType !== "file" ? "disabled" : ""}`} onSubmit={handleFileRegister}>
-            <button
-              type="button"
-              className="registration-card-header registration-card-header-button"
-              disabled={disabled || isRegistering}
-              onClick={() =>
-                setSelectedRegistrationType((current) => (current === "file" ? null : "file"))
-              }
-            >
-              <span className="registration-launch-label">첨부파일 등록</span>
-              <strong>파일 업로드로 법령 등록</strong>
-              <p className="helper-text">
-                보유 중인 텍스트 또는 Word 문서를 바로 비교 대상으로 올립니다.
-              </p>
-            </button>
-            <fieldset className="registration-card-fields" disabled={isFileRegistrationDisabled}>
-            <label className="field">
-              <span>법령 파일</span>
-              <input
-                id="law-file"
-                name="law-file"
-                type="file"
-                accept=".txt,.md,.doc,.docx,text/plain,text/markdown,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                onChange={(event) => setSourceFile(event.target.files?.[0] ?? null)}
-                disabled={isFileRegistrationDisabled}
-              />
-            </label>
-            <label className="field">
-              <span>표시 제목</span>
-              <input
-                value={fileSourceTitle}
-                onChange={(event) => setFileSourceTitle(event.target.value)}
-                placeholder="예: 개인정보보호법"
-                disabled={isFileRegistrationDisabled}
-              />
-            </label>
-            <div className="inline-fields">
-              <label className="field">
-                <span>버전 라벨</span>
-                <input
-                  value={fileVersionLabel}
-                  onChange={(event) => setFileVersionLabel(event.target.value)}
-                  placeholder="예: 2026-04 개정"
-                  disabled={isFileRegistrationDisabled}
-                />
-              </label>
-              <label className="field">
-                <span>시행일</span>
-                <input
-                  type="date"
-                  value={fileEffectiveDate}
-                  onChange={(event) => setFileEffectiveDate(event.target.value)}
-                  disabled={isFileRegistrationDisabled}
-                />
-              </label>
-            </div>
-            <button className="button" type="submit" disabled={isFileRegistrationDisabled}>
-              {isRegistering ? "법령 등록 중..." : "법령 파일 등록"}
-            </button>
-            </fieldset>
-            <div className="stack">
-              <div className="info-card">
-                <strong className="law-count-label">{`현재 등록된 첨부파일: ${fileLawVersions.length}건`}</strong>
-              </div>
-              {fileLawVersions.length === 0 ? (
-                <div className="empty-state compact-empty-state">
-                  <strong>등록된 첨부파일 법령이 없습니다.</strong>
-                </div>
-              ) : (
-                <div className="list law-list">
-                  {fileLawVersions.map((lawVersion) => renderLawVersionItem({
-                    lawVersion,
-                    selectedLawVersionIds,
-                    selectedSourceType,
-                    disabled,
-                    isRegistering,
-                    isMutatingLawVersionId,
-                    onToggleLawVersion,
-                    onStartEdit: handleStartEdit,
-                    onDelete: handleDelete,
-                  }))}
-                </div>
-              )}
-            </div>
-          </form>
-          </div>
-        </>
+        <div className="info-card detail-card">
+          <strong>실행 조건 충족</strong>
+          <p className="helper-text detailed-empty-reason">
+            좌우 그룹이 모두 준비되었습니다. 비교를 실행하면 하단 검토 패널에 경고와 권고가 함께 표시됩니다.
+          </p>
+        </div>
       )}
+      <div className="comparison-drop-grid">
+        <div
+          className={`comparison-drop-zone ${isTargetDropActive ? "drop-target-active" : ""}`}
+          onDragEnter={(event) => {
+            if (disabled || !hasPolicyDragPayload(event)) {
+              return;
+            }
+
+            event.preventDefault();
+            setIsTargetDropActive(true);
+          }}
+          onDragOver={(event) => {
+            if (disabled || !hasPolicyDragPayload(event)) {
+              return;
+            }
+
+            event.preventDefault();
+            event.dataTransfer.dropEffect = "copy";
+            if (!isTargetDropActive) {
+              setIsTargetDropActive(true);
+            }
+          }}
+          onDragLeave={(event) => {
+            if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+              setIsTargetDropActive(false);
+            }
+          }}
+          onDrop={handlePolicyDrop}
+        >
+          <div className="selection-summary-card">
+            <div className="document-list-header">
+              <strong>비교 대상 정책 및 지침</strong>
+              <span className="document-title-prefix">{`${targetDocuments.length}건 선택됨`}</span>
+            </div>
+            <span className="timestamp">
+              문서 목록에서 끌어다 놓아 비교할 정책·지침 그룹을 구성합니다.
+            </span>
+          </div>
+          {targetDocuments.length === 0 ? (
+            <div className="empty-state compact-empty-state">
+              <strong>비교할 정책·지침이 없습니다.</strong>
+              <p>문서 목록에서 이 영역으로 끌어다 놓으세요.</p>
+            </div>
+          ) : (
+            <div className="list law-list">
+              {targetDocuments.map((document) => (
+                <div
+                  key={document.id}
+                  className={`list-item document-list-item ${getDocumentKindClassName(document.title)} selected`}
+                  draggable
+                  onDragStart={(event) => handlePolicyDragStart(event, document.id)}
+                  onDragEnd={handleDragCancel}
+                >
+                  <div className="list-item-row">
+                    <div className="stack list-item-copy">
+                      <div className="document-list-header">
+                        <strong>{document.title}</strong>
+                      </div>
+                      <span className="timestamp">{formatDocumentEffectiveDate(document)}</span>
+                    </div>
+                    <button
+                      type="button"
+                      className="button ghost select-button"
+                      disabled={disabled}
+                      onClick={() => onRemoveTargetDocument(document.id)}
+                    >
+                      해제
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div
+          ref={lawDropZoneRef}
+          className={`comparison-drop-zone ${isReferenceDropActive ? "drop-target-active" : ""}`}
+          onDragEnter={(event) => {
+            if (disabled || (!hasPolicyDragPayload(event) && !hasLawDragPayload(event))) {
+              return;
+            }
+
+            event.preventDefault();
+            setIsReferenceDropActive(true);
+          }}
+          onDragOver={(event) => {
+            if (disabled || (!hasPolicyDragPayload(event) && !hasLawDragPayload(event))) {
+              return;
+            }
+
+            event.preventDefault();
+            event.dataTransfer.dropEffect = "copy";
+            if (!isReferenceDropActive) {
+              setIsReferenceDropActive(true);
+            }
+          }}
+          onDragLeave={(event) => {
+            if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+              setIsReferenceDropActive(false);
+            }
+          }}
+          onDrop={(event) => {
+            if (hasPolicyDragPayload(event)) {
+              handleReferencePolicyDrop(event);
+              return;
+            }
+
+            handleLawDrop(event);
+          }}
+        >
+          <div className="selection-summary-card">
+            <div className="document-list-header">
+              <strong>기준 법률</strong>
+              <span className="document-title-prefix">{`${rightGroupCount}건 선택됨`}</span>
+            </div>
+            <span className="timestamp">
+              문서 목록과 아래 기준 법률 목록에서 이 영역으로 끌어다 놓으세요.
+            </span>
+          </div>
+          {referenceDocuments.length === 0 && selectedLawVersions.length === 0 ? (
+            <div className="empty-state compact-empty-state">
+              <strong>선택된 문서가 없습니다.</strong>
+              <p>문서 목록이나 아래 기준 법률 목록에서 이 영역으로 끌어다 놓으세요.</p>
+            </div>
+          ) : (
+            <div className="list law-list">
+              {referenceDocuments.map((document) => (
+                <div
+                  key={document.id}
+                  className={`list-item document-list-item ${getDocumentKindClassName(document.title)} selected`}
+                  draggable
+                  onDragStart={(event) => handlePolicyDragStart(event, document.id)}
+                  onDragEnd={handleDragCancel}
+                >
+                  <div className="list-item-row">
+                    <div className="stack list-item-copy">
+                      <div className="document-list-header">
+                        <strong>{document.title}</strong>
+                      </div>
+                      <span className="timestamp">{formatDocumentEffectiveDate(document)}</span>
+                    </div>
+                    <button
+                      type="button"
+                      className="button ghost select-button"
+                      disabled={disabled}
+                      onClick={() => onRemoveReferenceDocument(document.id)}
+                    >
+                      해제
+                    </button>
+                  </div>
+                </div>
+              ))}
+              {selectedLawVersions.map((lawVersion) => (
+                <div
+                  key={lawVersion.id}
+                  className="list-item selected"
+                  draggable
+                  onDragStart={(event) => handleLawDragStart(event, lawVersion.id)}
+                  onDragEnd={(event) => handleLawDragEnd(event)}
+                >
+                  <div className="list-item-row">
+                    <div className="stack list-item-copy">
+                      <div className="document-list-header">
+                        <strong>{lawVersion.source_title ?? "법령 원문"}</strong>
+                      </div>
+                      <span className="timestamp">{formatLawVersionMeta(lawVersion)}</span>
+                    </div>
+                    <button
+                      type="button"
+                      className="button ghost select-button"
+                      disabled={disabled}
+                      onClick={() => onRemoveLawVersion(lawVersion.id)}
+                    >
+                      해제
+                    </button>
+                    <button
+                      type="button"
+                      className="button ghost select-button"
+                      disabled={disabled || isMutatingLawVersionId === lawVersion.id}
+                      onClick={() => handleReparse(lawVersion.id)}
+                    >
+                      {isMutatingLawVersionId === lawVersion.id ? "처리 중..." : "재파싱"}
+                    </button>
+                    <button
+                      type="button"
+                      className="button ghost select-button"
+                      disabled={disabled || isMutatingLawVersionId === lawVersion.id}
+                      onClick={() => handleDelete(lawVersion.id)}
+                    >
+                      {isMutatingLawVersionId === lawVersion.id ? "삭제 중..." : "삭제"}
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {lawVersions.length > 0 ? (
+        <div className="stack">
+          <div className="info-card">
+            <strong className="law-count-label">{`등록된 기준 법률: ${lawVersions.length}건`}</strong>
+          </div>
+          <div className="list law-list">
+            {availableLawVersions.map((lawVersion) => (
+              <div
+                key={lawVersion.id}
+                className="list-item"
+                draggable
+                onDragStart={(event) => handleLawDragStart(event, lawVersion.id)}
+                onDragEnd={(event) => handleLawDragEnd(event)}
+              >
+                <div className="list-item-row">
+                  <div className="stack list-item-copy">
+                    <div className="document-list-header">
+                      <strong>{lawVersion.source_title ?? "법령 원문"}</strong>
+                    </div>
+                    <span className="timestamp">{formatLawVersionMeta(lawVersion)}</span>
+                  </div>
+                  <button
+                    type="button"
+                    className="button ghost select-button"
+                    disabled={disabled || isMutatingLawVersionId === lawVersion.id}
+                    onClick={() => handleReparse(lawVersion.id)}
+                  >
+                    {isMutatingLawVersionId === lawVersion.id ? "처리 중..." : "재파싱"}
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
 
       <div className="stack">
         <button
@@ -449,80 +576,38 @@ export function LawSourcePanel({
           disabled={
             disabled ||
             isComparing ||
-            selectedDocumentCount === 0 ||
-            selectedLawVersionIds.length === 0
+            targetDocuments.length === 0 ||
+            rightGroupCount === 0
           }
           onClick={handleRunComparison}
         >
-          {isComparing ? "비교 실행 중..." : "선택 정책·지침과 법령 비교 실행"}
+          {isComparing ? "비교 실행 중..." : "좌우 그룹 비교 실행"}
         </button>
+        <p className="helper-text">
+          {comparisonBlockingReason ??
+            "비교 실행 후에는 하단 패널에서 차이, 경고, AI 권고를 함께 검토할 수 있습니다."}
+        </p>
       </div>
     </div>
   );
 }
 
-function renderLawVersionItem(input: {
-  lawVersion: LawVersionSummary;
-  selectedLawVersionIds: string[];
-  selectedSourceType: "url" | "file" | null;
+function getComparisonBlockingReason(input: {
   disabled: boolean;
-  isRegistering: boolean;
-  isMutatingLawVersionId: string | null;
-  onToggleLawVersion: (lawVersionId: string) => void;
-  onStartEdit: (lawVersion: LawVersionSummary) => void;
-  onDelete: (lawVersionId: string) => void;
+  disabledReason: string | null;
+  targetCount: number;
+  rightGroupCount: number;
 }) {
-  const lawSourceType = getLawSourceType(input.lawVersion.source_link);
-  const isSourceTypeLocked =
-    input.selectedSourceType !== null && input.selectedSourceType !== lawSourceType;
-
-  return (
-    <div
-      key={input.lawVersion.id}
-      className={`list-item ${input.selectedLawVersionIds.includes(input.lawVersion.id) ? "selected" : ""}`}
-    >
-      <div className="list-item-row">
-        <div className="stack list-item-copy">
-          <div className="law-version-meta-row">
-            <span className="muted-label">{formatLawVersionMeta(input.lawVersion)}</span>
-            <span className={`law-source-badge ${lawSourceType}`}>
-              {lawSourceType === "file" ? "첨부파일" : "URL"}
-            </span>
-          </div>
-          <strong>{input.lawVersion.source_title ?? "법령 원문"}</strong>
-          <span className="helper-text">{formatSectionSummary(input.lawVersion.section_count)}</span>
-        </div>
-        <button
-          type="button"
-          className={`button select-button ${input.selectedLawVersionIds.includes(input.lawVersion.id) ? "secondary" : ""}`}
-          onClick={() => input.onToggleLawVersion(input.lawVersion.id)}
-          disabled={isSourceTypeLocked}
-        >
-          {input.selectedLawVersionIds.includes(input.lawVersion.id) ? "해제" : "선택"}
-        </button>
-        <button
-          type="button"
-          className="button ghost select-button"
-          disabled={input.disabled || input.isRegistering || input.isMutatingLawVersionId === input.lawVersion.id}
-          onClick={() => input.onStartEdit(input.lawVersion)}
-        >
-          수정
-        </button>
-        <button
-          type="button"
-          className="button ghost select-button"
-          disabled={input.disabled || input.isRegistering || input.isMutatingLawVersionId === input.lawVersion.id}
-          onClick={() => input.onDelete(input.lawVersion.id)}
-        >
-          {input.isMutatingLawVersionId === input.lawVersion.id ? "삭제 중..." : "삭제"}
-        </button>
-      </div>
-    </div>
-  );
-}
-
-function getLawSourceType(sourceLink: string) {
-  return sourceLink.startsWith("storage://") ? "file" : "url";
+  if (input.disabled) {
+    return input.disabledReason ?? "현재 세션 또는 설정 상태 때문에 비교 기능이 잠겨 있습니다.";
+  }
+  if (input.targetCount === 0) {
+    return "좌측 그룹에 정책·지침이 없어 비교를 시작할 수 없습니다. 문서 목록에서 검토 대상을 먼저 드래그하세요.";
+  }
+  if (input.rightGroupCount === 0) {
+    return "우측 그룹에 기준 문서나 법령이 없습니다. 비교 기준을 추가해야 차이 분석과 권고를 생성할 수 있습니다.";
+  }
+  return null;
 }
 
 function formatLawVersionMeta(lawVersion: LawVersionSummary) {
@@ -541,10 +626,30 @@ function formatLawVersionMeta(lawVersion: LawVersionSummary) {
   return "버전 미지정";
 }
 
-function formatSectionSummary(sectionCount: number) {
-  if (sectionCount <= 1) {
-    return `구조 섹션 ${sectionCount}건`;
+function formatDocumentEffectiveDate(document: DocumentSummary) {
+  return document.effective_date
+    ? `시행일 ${document.effective_date}`
+    : "시행일 미지정";
+}
+
+function getDocumentKindClassName(title: string) {
+  const normalizedTitle = title.trim();
+
+  if (
+    normalizedTitle.includes("법률") ||
+    normalizedTitle.includes("법") ||
+    normalizedTitle.endsWith("기준")
+  ) {
+    return "document-kind-law";
   }
 
-  return `구조 섹션 ${sectionCount}건 저장됨`;
+  if (normalizedTitle.endsWith("지침")) {
+    return "document-kind-guideline";
+  }
+
+  if (normalizedTitle.endsWith("정책")) {
+    return "document-kind-policy";
+  }
+
+  return "document-kind-default";
 }
