@@ -42,6 +42,15 @@ export interface WorkspaceFavorite {
   selection: WorkspaceSelectionSnapshot;
 }
 
+export interface ReviewExecutionHistoryEntry {
+  id: string;
+  createdAt: string;
+  reviewerEmail: string;
+  targetTitles: string[];
+  referenceTitles: string[];
+  comparisonRunIds: string[];
+}
+
 export interface LawSectionRecord {
   id: string;
   hierarchy_type: HierarchyType;

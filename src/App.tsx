@@ -25,10 +25,12 @@ import {
   listComparisonRuns,
   listDocuments,
   listLawVersions,
+  listReviewExecutionHistory,
   listWorkspaceFavorites,
   reparseLawSource,
   reparseDocument,
   runComparison,
+  saveReviewExecutionHistoryEntry,
   saveWorkspaceFavorite,
   uploadDocument,
 } from "./lib/documentService";
@@ -43,6 +45,7 @@ import type {
   ComparisonRunSummary,
   DocumentSummary,
   LawVersionSummary,
+  ReviewExecutionHistoryEntry,
   WorkspaceFavorite,
   WorkspaceSelectionSnapshot,
 } from "./types";
@@ -58,15 +61,6 @@ type AppNotice = {
   detail?: string;
   actions?: string[];
   debug?: string[];
-};
-
-type ReviewExecutionHistoryEntry = {
-  id: string;
-  createdAt: string;
-  reviewerEmail: string;
-  targetTitles: string[];
-  referenceTitles: string[];
-  comparisonRunIds: string[];
 };
 
 type WorkspaceSection =
@@ -330,15 +324,20 @@ export default function App() {
       return;
     }
 
-    Promise.all([listDocuments(), listLawVersions(), listComparisonRuns(), listWorkspaceFavorites()])
-      .then(([documentItems, lawVersionItems, comparisonItems, favoriteItems]) => {
+    Promise.all([
+      listDocuments(),
+      listLawVersions(),
+      listComparisonRuns(),
+      listWorkspaceFavorites(),
+      listReviewExecutionHistory(),
+    ])
+      .then(([documentItems, lawVersionItems, comparisonItems, favoriteItems, reviewHistoryItems]) => {
         const savedSelection = readWorkspaceSelection(sessionUserId);
-        const savedReviewExecutionHistory = readReviewExecutionHistory(sessionUserId);
         setDocuments(documentItems);
         setLawVersions(lawVersionItems);
         setComparisonRuns(comparisonItems);
         setWorkspaceFavorites(favoriteItems);
-        setReviewExecutionHistory(savedReviewExecutionHistory);
+        setReviewExecutionHistory(reviewHistoryItems);
         setSelectedDocumentId((current) => {
           const nextSelectedId =
             workspaceSelectionHydrated && current
@@ -581,14 +580,6 @@ export default function App() {
     comparisonReferenceDocumentIds,
     selectedLawVersionIds,
   ]);
-
-  useEffect(() => {
-    if (!sessionUserId || !workspaceSelectionHydrated) {
-      return;
-    }
-
-    writeReviewExecutionHistory(sessionUserId, reviewExecutionHistory);
-  }, [sessionUserId, workspaceSelectionHydrated, reviewExecutionHistory]);
 
   async function handleUpload(file: File, title: string, description: string) {
     setAppNotice({
@@ -930,7 +921,22 @@ export default function App() {
 
     if (selectedLawVersionIds.length === 0) {
       setAnalysisRequestKey((current) => current + 1);
-      setReviewExecutionHistory((current) => [reviewHistoryBase, ...current].slice(0, 50));
+      try {
+        const savedHistoryEntry = await saveReviewExecutionHistoryEntry({
+          reviewerEmail: reviewHistoryBase.reviewerEmail,
+          targetTitles: reviewHistoryBase.targetTitles,
+          referenceTitles: reviewHistoryBase.referenceTitles,
+          comparisonRunIds: [],
+        });
+        setReviewExecutionHistory((current) => [savedHistoryEntry, ...current].slice(0, 50));
+      } catch (error) {
+        setAppNotice({
+          tone: "warning",
+          label: "이력 저장 실패",
+          title: "검토 실행 이력을 데이터베이스에 저장하지 못했습니다.",
+          detail: error instanceof Error ? error.message : "검토는 계속 진행되지만 이력 관리에는 표시되지 않을 수 있습니다.",
+        });
+      }
       setAppNotice({
         tone: "info",
         label: "검토 실행 중",
@@ -976,13 +982,22 @@ export default function App() {
       const comparisonRunIds = results
         .map((item) => item?.data?.comparisonRunId)
         .filter((value): value is string => typeof value === "string");
-      setReviewExecutionHistory((current) => [
-        {
-          ...reviewHistoryBase,
+      try {
+        const savedHistoryEntry = await saveReviewExecutionHistoryEntry({
+          reviewerEmail: reviewHistoryBase.reviewerEmail,
+          targetTitles: reviewHistoryBase.targetTitles,
+          referenceTitles: reviewHistoryBase.referenceTitles,
           comparisonRunIds,
-        },
-        ...current,
-      ].slice(0, 50));
+        });
+        setReviewExecutionHistory((current) => [savedHistoryEntry, ...current].slice(0, 50));
+      } catch (error) {
+        setAppNotice({
+          tone: "warning",
+          label: "이력 저장 실패",
+          title: "검토 실행 이력을 데이터베이스에 저장하지 못했습니다.",
+          detail: error instanceof Error ? error.message : "비교 결과는 생성됐지만 이력 관리에는 표시되지 않을 수 있습니다.",
+        });
+      }
       const comparisonRunId =
         results[0]?.data?.comparisonRunId ??
         comparisonItems[0]?.id ??
@@ -1936,45 +1951,6 @@ function writeWorkspaceSelection(userId: string, selection: PersistedWorkspaceSe
   );
 }
 
-function getReviewExecutionHistoryStorageKey(userId: string) {
-  return `policy-revision-mgmt-review-execution-history:${userId}`;
-}
-
-function readReviewExecutionHistory(userId: string): ReviewExecutionHistoryEntry[] {
-  if (typeof window === "undefined") {
-    return [];
-  }
-
-  const raw = window.localStorage.getItem(getReviewExecutionHistoryStorageKey(userId));
-  if (!raw) {
-    return [];
-  }
-
-  try {
-    const parsed = JSON.parse(raw) as unknown[];
-    if (!Array.isArray(parsed)) {
-      return [];
-    }
-
-    return parsed
-      .map((entry) => normalizeReviewExecutionHistoryEntry(entry))
-      .filter((entry): entry is ReviewExecutionHistoryEntry => entry !== null);
-  } catch {
-    return [];
-  }
-}
-
-function writeReviewExecutionHistory(userId: string, entries: ReviewExecutionHistoryEntry[]) {
-  if (typeof window === "undefined") {
-    return;
-  }
-
-  window.localStorage.setItem(
-    getReviewExecutionHistoryStorageKey(userId),
-    JSON.stringify(entries),
-  );
-}
-
 function filterExistingIds<T extends { id: string }>(ids: string[], items: T[]) {
   const itemIds = new Set(items.map((item) => item.id));
   return ids.filter((id) => itemIds.has(id));
@@ -1986,36 +1962,6 @@ function createWorkspaceSelectionSnapshot(selection: PersistedWorkspaceSelection
     targetDocumentIds: Array.from(new Set(selection.targetDocumentIds)),
     referenceDocumentIds: Array.from(new Set(selection.referenceDocumentIds)),
     lawVersionIds: Array.from(new Set(selection.lawVersionIds)),
-  };
-}
-
-function normalizeReviewExecutionHistoryEntry(value: unknown): ReviewExecutionHistoryEntry | null {
-  if (!value || typeof value !== "object") {
-    return null;
-  }
-
-  const candidate = value as Partial<ReviewExecutionHistoryEntry>;
-  if (
-    typeof candidate.id !== "string" ||
-    typeof candidate.createdAt !== "string" ||
-    typeof candidate.reviewerEmail !== "string"
-  ) {
-    return null;
-  }
-
-  return {
-    id: candidate.id,
-    createdAt: candidate.createdAt,
-    reviewerEmail: candidate.reviewerEmail,
-    targetTitles: Array.isArray(candidate.targetTitles)
-      ? candidate.targetTitles.filter((entry): entry is string => typeof entry === "string")
-      : [],
-    referenceTitles: Array.isArray(candidate.referenceTitles)
-      ? candidate.referenceTitles.filter((entry): entry is string => typeof entry === "string")
-      : [],
-    comparisonRunIds: Array.isArray(candidate.comparisonRunIds)
-      ? candidate.comparisonRunIds.filter((entry): entry is string => typeof entry === "string")
-      : [],
   };
 }
 

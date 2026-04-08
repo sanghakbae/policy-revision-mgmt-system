@@ -18,6 +18,7 @@ import type {
   DocumentSummary,
   LawDetail,
   LawVersionSummary,
+  ReviewExecutionHistoryEntry,
   WorkspaceFavorite,
   WorkspaceSelectionSnapshot,
 } from "../types";
@@ -46,6 +47,15 @@ interface WorkspaceFavoriteRow {
   target_document_ids: string[] | null;
   reference_document_ids: string[] | null;
   law_version_ids: string[] | null;
+}
+
+interface ReviewExecutionHistoryRow {
+  id: string;
+  reviewer_email: string;
+  target_titles: string[] | null;
+  reference_titles: string[] | null;
+  comparison_run_ids: string[] | null;
+  created_at: string;
 }
 
 export async function uploadDocument(input: {
@@ -321,6 +331,64 @@ export async function listWorkspaceFavorites(): Promise<WorkspaceFavorite[]> {
       lawVersionIds: row.law_version_ids ?? [],
     }),
   }));
+}
+
+export async function listReviewExecutionHistory(): Promise<ReviewExecutionHistoryEntry[]> {
+  await ensureAuthenticatedSession();
+  const supabase = getSupabaseClient();
+  const { data, error } = await supabase
+    .from("policy_review_execution_history")
+    .select("id, reviewer_email, target_titles, reference_titles, comparison_run_ids, created_at")
+    .order("created_at", { ascending: false });
+
+  if (error) {
+    throwAuthAwareError(error.message);
+  }
+
+  return ((data ?? []) as ReviewExecutionHistoryRow[]).map((row) => ({
+    id: row.id,
+    createdAt: row.created_at,
+    reviewerEmail: row.reviewer_email,
+    targetTitles: row.target_titles ?? [],
+    referenceTitles: row.reference_titles ?? [],
+    comparisonRunIds: row.comparison_run_ids ?? [],
+  }));
+}
+
+export async function saveReviewExecutionHistoryEntry(input: {
+  reviewerEmail: string;
+  targetTitles: string[];
+  referenceTitles: string[];
+  comparisonRunIds: string[];
+}) {
+  const session = await ensureAuthenticatedSession();
+  const currentUser = await ensureAuthenticatedUser(session.access_token);
+  const supabase = getSupabaseClient();
+  const { data, error } = await supabase
+    .from("policy_review_execution_history")
+    .insert({
+      owner_user_id: currentUser.id,
+      reviewer_email: input.reviewerEmail,
+      target_titles: input.targetTitles,
+      reference_titles: input.referenceTitles,
+      comparison_run_ids: input.comparisonRunIds,
+    })
+    .select("id, reviewer_email, target_titles, reference_titles, comparison_run_ids, created_at")
+    .single();
+
+  if (error || !data) {
+    throwAuthAwareError(error?.message ?? "review execution history save failed");
+  }
+
+  const row = data as ReviewExecutionHistoryRow;
+  return {
+    id: row.id,
+    createdAt: row.created_at,
+    reviewerEmail: row.reviewer_email,
+    targetTitles: row.target_titles ?? [],
+    referenceTitles: row.reference_titles ?? [],
+    comparisonRunIds: row.comparison_run_ids ?? [],
+  } satisfies ReviewExecutionHistoryEntry;
 }
 
 export async function saveWorkspaceFavorite(input: {
