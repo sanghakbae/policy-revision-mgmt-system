@@ -18,6 +18,8 @@ import type {
   DocumentSummary,
   LawDetail,
   LawVersionSummary,
+  WorkspaceFavorite,
+  WorkspaceSelectionSnapshot,
 } from "../types";
 import { parsePolicyText } from "../../shared/policyParser";
 import { buildSectionHierarchyColumns } from "../../shared/sectionHierarchyColumns";
@@ -34,6 +36,16 @@ interface ComparisonRunMetaRow {
         document_id?: string;
       }>
     | null;
+}
+
+interface WorkspaceFavoriteRow {
+  id: string;
+  name: string;
+  updated_at: string;
+  selected_document_id: string | null;
+  target_document_ids: string[] | null;
+  reference_document_ids: string[] | null;
+  law_version_ids: string[] | null;
 }
 
 export async function uploadDocument(input: {
@@ -282,6 +294,99 @@ export async function listDocuments(): Promise<DocumentSummary[]> {
       section_count: latestVersion?.policy_document_sections?.[0]?.count ?? 0,
     };
   });
+}
+
+export async function listWorkspaceFavorites(): Promise<WorkspaceFavorite[]> {
+  await ensureAuthenticatedSession();
+  const supabase = getSupabaseClient();
+  const { data, error } = await supabase
+    .from("policy_workspace_favorites")
+    .select(
+      "id, name, updated_at, selected_document_id, target_document_ids, reference_document_ids, law_version_ids",
+    )
+    .order("updated_at", { ascending: false });
+
+  if (error) {
+    throwAuthAwareError(error.message);
+  }
+
+  return ((data ?? []) as WorkspaceFavoriteRow[]).map((row) => ({
+    id: row.id,
+    name: row.name,
+    updatedAt: row.updated_at,
+    selection: normalizeWorkspaceSelectionSnapshot({
+      selectedDocumentId: row.selected_document_id,
+      targetDocumentIds: row.target_document_ids ?? [],
+      referenceDocumentIds: row.reference_document_ids ?? [],
+      lawVersionIds: row.law_version_ids ?? [],
+    }),
+  }));
+}
+
+export async function saveWorkspaceFavorite(input: {
+  favoriteId?: string;
+  name: string;
+  selection: WorkspaceSelectionSnapshot;
+}) {
+  const session = await ensureAuthenticatedSession();
+  const currentUser = await ensureAuthenticatedUser(session.access_token);
+  const supabase = getSupabaseClient();
+  const normalizedSelection = normalizeWorkspaceSelectionSnapshot(input.selection);
+  const payload = {
+    owner_user_id: currentUser.id,
+    name: input.name,
+    selected_document_id: normalizedSelection.selectedDocumentId,
+    target_document_ids: normalizedSelection.targetDocumentIds,
+    reference_document_ids: normalizedSelection.referenceDocumentIds,
+    law_version_ids: normalizedSelection.lawVersionIds,
+    updated_at: new Date().toISOString(),
+  };
+
+  const builder = input.favoriteId
+    ? supabase
+        .from("policy_workspace_favorites")
+        .update(payload)
+        .eq("id", input.favoriteId)
+        .select(
+          "id, name, updated_at, selected_document_id, target_document_ids, reference_document_ids, law_version_ids",
+        )
+        .single()
+    : supabase
+        .from("policy_workspace_favorites")
+        .upsert(payload, { onConflict: "owner_user_id,name" })
+        .select(
+          "id, name, updated_at, selected_document_id, target_document_ids, reference_document_ids, law_version_ids",
+        )
+        .single();
+
+  const { data, error } = await builder;
+
+  if (error || !data) {
+    throwAuthAwareError(error?.message ?? "workspace favorite save failed");
+  }
+
+  const row = data as WorkspaceFavoriteRow;
+  return {
+    id: row.id,
+    name: row.name,
+    updatedAt: row.updated_at,
+    selection: normalizeWorkspaceSelectionSnapshot({
+      selectedDocumentId: row.selected_document_id,
+      targetDocumentIds: row.target_document_ids ?? [],
+      referenceDocumentIds: row.reference_document_ids ?? [],
+      lawVersionIds: row.law_version_ids ?? [],
+    }),
+  } satisfies WorkspaceFavorite;
+}
+
+export async function deleteWorkspaceFavorite(favoriteId: string) {
+  await ensureAuthenticatedSession();
+  const supabase = getSupabaseClient();
+  const { error } = await supabase.from("policy_workspace_favorites").delete().eq("id", favoriteId);
+
+  if (error) {
+    throwAuthAwareError(error.message);
+  }
 }
 
 export async function getDocumentDetail(
@@ -1621,4 +1726,13 @@ async function extractDocumentText(file: File) {
 
 function isLegacyWordDocument(fileName: string) {
   return /\.(doc)$/iu.test(fileName);
+}
+
+function normalizeWorkspaceSelectionSnapshot(selection: WorkspaceSelectionSnapshot): WorkspaceSelectionSnapshot {
+  return {
+    selectedDocumentId: selection.selectedDocumentId,
+    targetDocumentIds: Array.from(new Set(selection.targetDocumentIds)),
+    referenceDocumentIds: Array.from(new Set(selection.referenceDocumentIds)),
+    lawVersionIds: Array.from(new Set(selection.lawVersionIds)),
+  };
 }

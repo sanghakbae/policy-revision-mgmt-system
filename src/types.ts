@@ -28,6 +28,20 @@ export interface LawVersionSummary {
   section_count: number;
 }
 
+export interface WorkspaceSelectionSnapshot {
+  selectedDocumentId: string | null;
+  targetDocumentIds: string[];
+  referenceDocumentIds: string[];
+  lawVersionIds: string[];
+}
+
+export interface WorkspaceFavorite {
+  id: string;
+  name: string;
+  updatedAt: string;
+  selection: WorkspaceSelectionSnapshot;
+}
+
 export interface LawSectionRecord {
   id: string;
   hierarchy_type: HierarchyType;

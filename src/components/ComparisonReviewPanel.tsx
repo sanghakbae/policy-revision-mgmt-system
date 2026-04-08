@@ -354,10 +354,6 @@ export function ComparisonReviewPanel({
   if (!shouldShowHistory && !comparisonRunId && comparisonRunIds.length === 0 && !hasSelectionContext) {
     return (
       <div className="stack comparison-review-shell">
-        <div className="section-header comparison-review-header">
-          <h2>검토 결과</h2>
-          <p>비교를 실행하면 1단계, 2단계, 3단계 결과가 아래 프레임에 순서대로 표시됩니다.</p>
-        </div>
         <AiGuidancePanel
           guidance={displayedGuidance}
           leftGroupReport={displayedLeftGroupReport}
@@ -378,8 +374,8 @@ export function ComparisonReviewPanel({
     return (
       <div className="stack comparison-review-shell">
         <div className="section-header comparison-review-header">
-          <h2>이력 관리</h2>
-          <p>저장된 검토 결과 이력을 확인하고 필요하면 다시 불러오세요.</p>
+          <h2>AI 리포트 이력</h2>
+          <p>저장된 AI 비교 리포트를 다시 열거나 삭제할 수 있습니다.</p>
         </div>
         <SavedAnalysisHistorySection
           entries={savedHistory}
@@ -643,9 +639,9 @@ function AiGuidancePanel(input: {
         <GroupReportSection
           stepLabel="1단계"
           frameClassName="comparison-review-stage-frame-step-1"
-          title="검토 비교 대상 정리"
-          description="검토 비교 대상 문서를 통합 정리합니다."
-          summary={input.leftGroupReport?.summary ?? "검토 비교 대상 리포트를 생성하면 여기에 결과가 표시됩니다."}
+          title="비교 대상 정리"
+          description="비교 대상 문서를 통합 정리합니다."
+          summary={input.leftGroupReport?.summary ?? "비교 대상 리포트를 생성하면 여기에 결과가 표시됩니다."}
           keyFindings={input.leftGroupReport?.key_findings ?? []}
           documents={(input.leftGroupReport?.documents ?? []).map((item) => ({
             id: `left-document-${item.document_id}`,
@@ -714,7 +710,7 @@ function SavedAnalysisHistorySection(input: {
     <section className="review-column comparison-history-shell">
       <div className="section-header">
         <h3>AI 리포트 이력</h3>
-        <p>저장한 비교 리포트를 다시 열어 현재 패널에서 확인할 수 있습니다.</p>
+        <p>저장한 AI 비교 리포트를 다시 열어 현재 패널에서 확인할 수 있습니다.</p>
       </div>
       {input.entries.length === 0 ? (
         <div className="info-card">
@@ -723,27 +719,49 @@ function SavedAnalysisHistorySection(input: {
         </div>
       ) : (
         <div className="stack">
-          {pageEntries.map((entry) => (
-            <article key={entry.id} className="info-card comparison-history-card">
-              <span className="muted-label">{formatSavedHistoryTimestamp(entry.createdAt)}</span>
-              <strong>{entry.title}</strong>
-              <p className="helper-text detailed-empty-reason">{entry.selectionSummary}</p>
-              <div className="pill-row">
-                <span className="pill neutral">좌측 {entry.selectionCounts.leftDocumentCount}건</span>
-                <span className="pill neutral">우측 문서 {entry.selectionCounts.rightDocumentCount}건</span>
-                <span className="pill neutral">법령 {entry.selectionCounts.rightLawCount}건</span>
-                <span className="pill neutral">OpenAI {entry.guidance.api_call_count}건</span>
-              </div>
-              <div className="button-row">
-                <button type="button" className="button ghost" onClick={() => input.onLoad(entry.id)}>
-                  이력 열기
-                </button>
-                <button type="button" className="button ghost" onClick={() => input.onDelete(entry.id)}>
-                  이력 삭제
-                </button>
-              </div>
-            </article>
-          ))}
+          <div className="comparison-table-wrap comparison-history-table-wrap">
+            <table className="comparison-data-table comparison-history-table">
+              <thead>
+                <tr>
+                  <th>저장 시각</th>
+                  <th>리포트</th>
+                  <th>비교 범위</th>
+                  <th>선택 건수</th>
+                  <th>OpenAI 호출</th>
+                  <th>작업</th>
+                </tr>
+              </thead>
+              <tbody>
+                {pageEntries.map((entry) => (
+                  <tr key={entry.id}>
+                    <td>{formatSavedHistoryTimestamp(entry.createdAt)}</td>
+                    <td>
+                      <strong>{entry.title}</strong>
+                    </td>
+                    <td>{entry.selectionSummary}</td>
+                    <td>
+                      좌측 {entry.selectionCounts.leftDocumentCount}건
+                      <br />
+                      우측 문서 {entry.selectionCounts.rightDocumentCount}건
+                      <br />
+                      법령 {entry.selectionCounts.rightLawCount}건
+                    </td>
+                    <td>{entry.guidance.api_call_count}건</td>
+                    <td>
+                      <div className="comparison-history-table-actions">
+                        <button type="button" className="button ghost" onClick={() => input.onLoad(entry.id)}>
+                          열기
+                        </button>
+                        <button type="button" className="button ghost" onClick={() => input.onDelete(entry.id)}>
+                          삭제
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
           {totalPages > 1 ? (
             <div className="comparison-history-pagination">
               {Array.from({ length: totalPages }, (_, index) => index + 1).map((pageNumber) => (
@@ -1090,9 +1108,9 @@ export function getStageProgress(input: {
 
   if (input.leftGroupReport) {
     return {
-      label: input.isAnalyzingSelection ? "기준 정리 진행 중" : "왼쪽 정리 완료",
+      label: input.isAnalyzingSelection ? "기준 정리 진행 중" : "비교 대상 정리 완료",
       detail:
-        input.analysisStageLabel ?? "왼쪽 그룹 정리가 끝났고 기준 정리를 준비하고 있습니다.",
+        input.analysisStageLabel ?? "비교 대상 정리가 끝났고 기준 정리를 준비하고 있습니다.",
       percent: input.rightGroupReport ? 66 : 33,
       steps,
     };

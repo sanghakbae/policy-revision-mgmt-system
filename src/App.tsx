@@ -19,14 +19,17 @@ import {
 } from "../shared/analysisPrompts";
 import {
   analyzeSelectedRevisionsStage,
+  deleteWorkspaceFavorite,
   deleteLawSource,
   deleteDocument,
   listComparisonRuns,
   listDocuments,
   listLawVersions,
+  listWorkspaceFavorites,
   reparseLawSource,
   reparseDocument,
   runComparison,
+  saveWorkspaceFavorite,
   uploadDocument,
 } from "./lib/documentService";
 import {
@@ -40,22 +43,13 @@ import type {
   ComparisonRunSummary,
   DocumentSummary,
   LawVersionSummary,
+  WorkspaceFavorite,
+  WorkspaceSelectionSnapshot,
 } from "./types";
 import type { Session } from "@supabase/supabase-js";
 
 type NoticeTone = "info" | "success" | "warning" | "danger";
-type PersistedWorkspaceSelection = {
-  selectedDocumentId: string | null;
-  targetDocumentIds: string[];
-  referenceDocumentIds: string[];
-  lawVersionIds: string[];
-};
-type WorkspaceFavorite = {
-  id: string;
-  name: string;
-  updatedAt: string;
-  selection: PersistedWorkspaceSelection;
-};
+type PersistedWorkspaceSelection = WorkspaceSelectionSnapshot;
 
 type AppNotice = {
   tone: NoticeTone;
@@ -66,7 +60,23 @@ type AppNotice = {
   debug?: string[];
 };
 
-type WorkspaceSection = "documents" | "comparison" | "results" | "history" | "settings";
+type ReviewExecutionHistoryEntry = {
+  id: string;
+  createdAt: string;
+  reviewerEmail: string;
+  targetTitles: string[];
+  referenceTitles: string[];
+  comparisonRunIds: string[];
+};
+
+type WorkspaceSection =
+  | "dashboard"
+  | "documents"
+  | "comparison"
+  | "results"
+  | "history"
+  | "aiHistory"
+  | "settings";
 
 export default function App() {
   const emptyComparisonAnalysisState: ComparisonReviewAnalysisState = {
@@ -103,7 +113,8 @@ export default function App() {
   const [lawPreviewRefreshKey, setLawPreviewRefreshKey] = useState(0);
   const [workspaceSelectionHydrated, setWorkspaceSelectionHydrated] = useState(false);
   const [workspaceFavorites, setWorkspaceFavorites] = useState<WorkspaceFavorite[]>([]);
-  const [activeWorkspaceSection, setActiveWorkspaceSection] = useState<WorkspaceSection>("documents");
+  const [reviewExecutionHistory, setReviewExecutionHistory] = useState<ReviewExecutionHistoryEntry[]>([]);
+  const [activeWorkspaceSection, setActiveWorkspaceSection] = useState<WorkspaceSection>("dashboard");
   const [appNotice, setAppNoticeState] = useState<AppNotice | null>(null);
   const [comparisonOverview, setComparisonOverview] = useState<ComparisonReviewOverviewSnapshot | null>(null);
   const [comparisonAnalysisState, setComparisonAnalysisState] = useState<ComparisonReviewAnalysisState>(
@@ -128,6 +139,23 @@ export default function App() {
       title: message,
       detail: inferNoticeDetail(message),
       actions: inferNoticeActions(message),
+    });
+  }
+
+  async function handleHeaderSignOut() {
+    const supabase = getSupabaseClient();
+    const { error } = await supabase.auth.signOut();
+
+    if (!error) {
+      clearSupabaseAuthStorage();
+    }
+
+    setAppNotice({
+      tone: error ? "danger" : "warning",
+      label: "인증 상태",
+      title: error ? "로그아웃에 실패했습니다." : "로그아웃되었습니다.",
+      detail: error ? error.message : "다시 로그인하기 전까지 업로드와 비교 실행은 비활성화됩니다.",
+      actions: error ? ["잠시 후 다시 시도하세요."] : ["Google 로그인을 다시 진행하세요."],
     });
   }
 
@@ -241,22 +269,7 @@ export default function App() {
       data: { subscription },
     } = supabase.auth.onAuthStateChange(async (event, nextSession) => {
       if (event === "SIGNED_OUT") {
-        const {
-          data: { session: currentSession },
-        } = await supabase.auth.getSession();
-
-        if (currentSession) {
-          setSession(currentSession);
-          setAppNotice({
-            tone: "success",
-            label: "인증 상태",
-            title: "인증되었습니다.",
-            detail: "세션이 유지되어 작업을 계속할 수 있습니다.",
-            debug: ["SIGNED_OUT 이벤트 수신 후 기존 세션 유지 확인"],
-          });
-          return;
-        }
-
+        clearSupabaseAuthStorage();
         setSession(null);
         setAppNotice({
           tone: "warning",
@@ -301,6 +314,7 @@ export default function App() {
       setDocuments([]);
       setLawVersions([]);
       setComparisonRuns([]);
+      setReviewExecutionHistory([]);
       setSelectedDocumentId(null);
       setCheckedDocumentIds([]);
       setComparisonTargetDocumentIds([]);
@@ -316,14 +330,15 @@ export default function App() {
       return;
     }
 
-    Promise.all([listDocuments(), listLawVersions(), listComparisonRuns()])
-      .then(([documentItems, lawVersionItems, comparisonItems]) => {
+    Promise.all([listDocuments(), listLawVersions(), listComparisonRuns(), listWorkspaceFavorites()])
+      .then(([documentItems, lawVersionItems, comparisonItems, favoriteItems]) => {
         const savedSelection = readWorkspaceSelection(sessionUserId);
-        const savedFavorites = readWorkspaceFavorites(sessionUserId);
+        const savedReviewExecutionHistory = readReviewExecutionHistory(sessionUserId);
         setDocuments(documentItems);
         setLawVersions(lawVersionItems);
         setComparisonRuns(comparisonItems);
-        setWorkspaceFavorites(savedFavorites);
+        setWorkspaceFavorites(favoriteItems);
+        setReviewExecutionHistory(savedReviewExecutionHistory);
         setSelectedDocumentId((current) => {
           const nextSelectedId =
             workspaceSelectionHydrated && current
@@ -391,15 +406,15 @@ export default function App() {
     setComparisonAnalysisState({
       ...emptyComparisonAnalysisState,
       isAnalyzingSelection: true,
-      analysisStageLabel: "1단계 검토 비교 대상 정리 중",
+      analysisStageLabel: "1단계 비교 대상 정리 중",
       analysisStagePhase: "left",
       analysisStageStartedAt: Date.now(),
     });
 
     (async () => {
-      setStatus("1단계 검토 비교 대상 정리를 시작했습니다.");
+      setStatus("1단계 비교 대상 정리를 시작했습니다.");
       const leftStage = await runComparisonStageWithTimeout(
-        "1단계 왼쪽 그룹 정리",
+        "1단계 비교 대상 정리",
         analyzeSelectedRevisionsStage({
           stage: "left",
           targetDocumentIds: comparisonTargetDocumentIds,
@@ -572,8 +587,8 @@ export default function App() {
       return;
     }
 
-    writeWorkspaceFavorites(sessionUserId, workspaceFavorites);
-  }, [sessionUserId, workspaceSelectionHydrated, workspaceFavorites]);
+    writeReviewExecutionHistory(sessionUserId, reviewExecutionHistory);
+  }, [sessionUserId, workspaceSelectionHydrated, reviewExecutionHistory]);
 
   async function handleUpload(file: File, title: string, description: string) {
     setAppNotice({
@@ -902,8 +917,20 @@ export default function App() {
       ],
     });
 
+    const reviewHistoryBase = createReviewExecutionHistoryEntry({
+      reviewerEmail: session?.user.email ?? "알 수 없음",
+      targetTitles: selectedDocuments.map((item) => item.title),
+      referenceTitles: [
+        ...selectedReferenceDocuments.map((item) => item.title),
+        ...selectedLawVersionIds
+          .map((lawVersionId) => lawVersions.find((item) => item.id === lawVersionId)?.source_title)
+          .filter((value): value is string => Boolean(value)),
+      ],
+    });
+
     if (selectedLawVersionIds.length === 0) {
       setAnalysisRequestKey((current) => current + 1);
+      setReviewExecutionHistory((current) => [reviewHistoryBase, ...current].slice(0, 50));
       setAppNotice({
         tone: "info",
         label: "검토 실행 중",
@@ -946,6 +973,16 @@ export default function App() {
 
       const comparisonItems = await listComparisonRuns();
       setComparisonRuns(comparisonItems);
+      const comparisonRunIds = results
+        .map((item) => item?.data?.comparisonRunId)
+        .filter((value): value is string => typeof value === "string");
+      setReviewExecutionHistory((current) => [
+        {
+          ...reviewHistoryBase,
+          comparisonRunIds,
+        },
+        ...current,
+      ].slice(0, 50));
       const comparisonRunId =
         results[0]?.data?.comparisonRunId ??
         comparisonItems[0]?.id ??
@@ -1070,7 +1107,11 @@ export default function App() {
     });
   }
 
-  function handleSaveWorkspaceFavorite() {
+  async function handleSaveWorkspaceFavorite() {
+    if (!sessionUserId) {
+      return;
+    }
+
     const snapshot = createWorkspaceSelectionSnapshot({
       selectedDocumentId,
       targetDocumentIds: comparisonTargetDocumentIds,
@@ -1108,26 +1149,28 @@ export default function App() {
     }
 
     const updatedAt = new Date().toISOString();
-    setWorkspaceFavorites((current) => {
-      const existing = current.find((item) => item.name === name);
-      if (existing) {
-        return current.map((item) =>
-          item.id === existing.id
-            ? { ...item, updatedAt, selection: snapshot }
-            : item,
-        );
-      }
+    const existing = workspaceFavorites.find((item) => item.name === name);
 
-      return [
-        {
-          id: crypto.randomUUID(),
-          name,
-          updatedAt,
-          selection: snapshot,
-        },
-        ...current,
-      ];
-    });
+    try {
+      const savedFavorite = await saveWorkspaceFavorite({
+        favoriteId: existing?.id,
+        name,
+        selection: snapshot,
+      });
+
+      setWorkspaceFavorites((current) => {
+        const withoutSaved = current.filter((item) => item.id !== savedFavorite.id);
+        return [{ ...savedFavorite, updatedAt }, ...withoutSaved];
+      });
+    } catch (error) {
+      setAppNotice({
+        tone: "danger",
+        label: "즐겨찾기 저장 실패",
+        title: "배치 즐겨찾기를 저장하지 못했습니다.",
+        detail: error instanceof Error ? error.message : "잠시 후 다시 시도하세요.",
+      });
+      return;
+    }
 
     setAppNotice({
       tone: "success",
@@ -1178,13 +1221,25 @@ export default function App() {
     });
   }
 
-  function handleDeleteWorkspaceFavorite(favoriteId: string) {
+  async function handleDeleteWorkspaceFavorite(favoriteId: string) {
     const favorite = workspaceFavorites.find((item) => item.id === favoriteId);
     if (!favorite) {
       return;
     }
 
-    setWorkspaceFavorites((current) => current.filter((item) => item.id !== favoriteId));
+    try {
+      await deleteWorkspaceFavorite(favoriteId);
+      setWorkspaceFavorites((current) => current.filter((item) => item.id !== favoriteId));
+    } catch (error) {
+      setAppNotice({
+        tone: "danger",
+        label: "즐겨찾기 삭제 실패",
+        title: "배치 즐겨찾기를 삭제하지 못했습니다.",
+        detail: error instanceof Error ? error.message : "잠시 후 다시 시도하세요.",
+      });
+      return;
+    }
+
     setAppNotice({
       tone: "info",
       label: "즐겨찾기 삭제",
@@ -1211,12 +1266,16 @@ export default function App() {
     label: string;
   }[] = [
     {
+      id: "dashboard",
+      label: "대시보드",
+    },
+    {
       id: "documents",
       label: "문서 관리",
     },
     {
       id: "comparison",
-      label: "비교덱 구성",
+      label: "비교 설정",
     },
     {
       id: "results",
@@ -1227,6 +1286,10 @@ export default function App() {
       label: "이력 관리",
     },
     {
+      id: "aiHistory",
+      label: "AI 리포트 이력",
+    },
+    {
       id: "settings",
       label: "설정",
     },
@@ -1235,13 +1298,51 @@ export default function App() {
   const showWorkspaceNavigation = Boolean(session) && isSupabaseConfigured;
   const headerStatus = appNotice ?? {
     tone: "info" as const,
-    label: "상태",
+    label: "진행 현황",
     title: "대기 중",
     detail: "현재 실행 중인 작업이 없습니다.",
   };
+  const dashboardDocumentCategoryCounts = documents.reduce(
+    (counts, item) => {
+      const category = getDashboardDocumentCategory(item);
+
+      if (category) {
+        counts[category] += 1;
+      }
+
+      return counts;
+    },
+    {
+      정책: 0,
+      지침: 0,
+    } as Record<"정책" | "지침", number>,
+  );
+  const dashboardRegisteredLaws = getLatestRegisteredLaws(lawVersions);
+  const dashboardLawCategoryCounts = dashboardRegisteredLaws.reduce(
+    (counts, item) => {
+      const category = getLawDashboardCategory(item);
+
+      if (category) {
+        counts[category] += 1;
+      }
+
+      return counts;
+    },
+    {
+      법률: 0,
+      시행령: 0,
+      시행규칙: 0,
+      기준: 0,
+    } as Record<"법률" | "시행령" | "시행규칙" | "기준", number>,
+  );
+  const dashboardLawSectionCount = dashboardRegisteredLaws.reduce((sum, item) => sum + item.section_count, 0);
+  const dashboardRecentDocuments = documents.slice(0, 3);
+  const dashboardRecentLaws = dashboardRegisteredLaws.slice(0, 3);
+  const dashboardRecentRuns = reviewExecutionHistory.slice(0, 3);
+  const dashboardDocumentSectionCount = documents.reduce((sum, item) => sum + item.section_count, 0);
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell ${showWorkspaceNavigation ? "" : "login-shell"}`.trim()}>
       <div className="app-frame">
         <div className="app-main-column">
           <div className={`workspace-shell ${showWorkspaceNavigation ? "" : "no-sidebar"}`.trim()}>
@@ -1271,43 +1372,61 @@ export default function App() {
             ) : null}
 
             <div className="workspace-content">
-              <div className="workspace-hero-row">
-                <header
-                  className={`hero ${activeWorkspaceSection === "documents" ? "hero-documents" : ""}`.trim()}
-                >
-                  <div
-                    className={`hero-main ${activeWorkspaceSection === "documents" ? "hero-main-documents" : ""}`.trim()}
-                  >
-                    <p
-                      className={`eyebrow ${activeWorkspaceSection === "documents" ? "hero-documents-eyebrow" : ""}`.trim()}
+              {showWorkspaceNavigation ? (
+                <div className="workspace-auth-row">
+                  <div className="workspace-auth-inline" aria-label="로그인 상태">
+                    <span className="workspace-auth-inline-label">로그인 계정:</span>
+                    <strong>{session?.user.email ?? "세션 없음"}</strong>
+                    <button
+                      type="button"
+                      className="workspace-auth-inline-button"
+                      onClick={handleHeaderSignOut}
                     >
-                      {showWorkspaceNavigation ? activeWorkspaceMeta.kicker : "로그인"}
-                    </p>
-                    <h1
-                      className={`hero-title-single-line ${activeWorkspaceSection === "documents" ? "hero-documents-title" : ""}`.trim()}
-                    >
-                      {showWorkspaceNavigation ? activeWorkspaceMeta.title : "로그인"}
-                    </h1>
-                    <p
-                      className={`hero-copy ${activeWorkspaceSection === "documents" ? "hero-documents-copy" : ""}`.trim()}
-                    >
-                      {showWorkspaceNavigation
-                        ? activeWorkspaceMeta.description
-                        : "로그인 화면을 별도 페이지로 분리했습니다. 인증 후 문서 관리 화면으로 이동합니다."}
-                    </p>
+                      로그아웃
+                    </button>
                   </div>
-                </header>
-                <aside className="workspace-status-side">
-                  <section className="workspace-status-box" aria-label="상태">
-                    <span className="workspace-status-box-label">{headerStatus.label}</span>
-                    <strong>{headerStatus.title}</strong>
-                    {headerStatus.detail ? <p>{headerStatus.detail}</p> : null}
-                  </section>
-                </aside>
-              </div>
+                </div>
+              ) : null}
 
-              <main className="workspace-stack">
-                {!isSupabaseConfigured ? (
+              {showWorkspaceNavigation && activeWorkspaceSection !== "dashboard" ? (
+                <div className="workspace-hero-row">
+                  <header
+                    className={`hero ${activeWorkspaceSection === "documents" ? "hero-documents" : ""}`.trim()}
+                  >
+                    <div
+                      className={`hero-main ${activeWorkspaceSection === "documents" ? "hero-main-documents" : ""}`.trim()}
+                    >
+                      <p
+                        className={`eyebrow ${activeWorkspaceSection === "documents" ? "hero-documents-eyebrow" : ""}`.trim()}
+                      >
+                        {activeWorkspaceMeta.kicker}
+                      </p>
+                      <h1
+                        className={`hero-title-single-line ${activeWorkspaceSection === "documents" ? "hero-documents-title" : ""}`.trim()}
+                      >
+                        {activeWorkspaceMeta.title}
+                      </h1>
+                      <p
+                        className={`hero-copy ${activeWorkspaceSection === "documents" ? "hero-documents-copy" : ""}`.trim()}
+                      >
+                        {activeWorkspaceMeta.description}
+                      </p>
+                    </div>
+                  </header>
+                  <aside className="workspace-status-side">
+                    <section className="workspace-status-box workspace-progress-status-box" aria-label="진행 현황">
+                      <span className="workspace-status-box-label">{headerStatus.label}</span>
+                      <strong>{headerStatus.title}</strong>
+                      {headerStatus.detail ? <p>{headerStatus.detail}</p> : null}
+                    </section>
+                  </aside>
+                </div>
+              ) : null}
+
+              <main
+                className={`workspace-stack ${showWorkspaceNavigation && activeWorkspaceSection === "dashboard" ? "workspace-stack-no-hero" : ""}`.trim()}
+              >
+                {!showWorkspaceNavigation && !isSupabaseConfigured ? null : !isSupabaseConfigured ? (
                   <section className="panel">
                     <div className="warning-card">
                       <strong>Supabase 설정이 필요합니다</strong>
@@ -1326,28 +1445,177 @@ export default function App() {
                 {!showWorkspaceNavigation ? (
                   <section className="panel panel-equal-height workspace-body-card workspace-login-page">
                     <div className="workspace-login-layout">
-                      <div className="workspace-login-copy">
-                        <p className="workspace-login-kicker">Policy Revision Mgmt</p>
-                        <h2>준거성 검토 시스템 로그인</h2>
+                      <AuthPanel session={session} />
+                    </div>
+                  </section>
+                ) : null}
+
+                {activeWorkspaceSection === "dashboard" ? (
+                  <section className="workspace-body-plain workspace-dashboard-layout">
+                    <section className="panel workspace-dashboard-hero">
+                      <div className="workspace-dashboard-hero-copy">
+                        <p className="workspace-dashboard-kicker">Dashboard</p>
                         <p>
-                          정책 문서 등록, 비교덱 구성, 단계별 AI 검토 결과 확인까지 한 화면에서 처리합니다.
+                          법령, 정책·지침, 최근 점검 이력을 분리해서 보고 현재 관리 상태를 빠르게 파악할 수 있게 구성했습니다.
                         </p>
-                        <div className="workspace-login-feature-list">
-                          <div className="workspace-login-feature">
-                            <strong>문서 관리</strong>
-                            <p>등록된 정책·지침 문서를 구조화 섹션 기준으로 바로 검토합니다.</p>
+                      </div>
+                      <div className="workspace-dashboard-hero-actions">
+                        <button className="button" type="button" onClick={() => setActiveWorkspaceSection("documents")}>
+                          문서 관리
+                        </button>
+                        <button className="button secondary" type="button" onClick={() => setActiveWorkspaceSection("comparison")}>
+                          비교 설정
+                        </button>
+                        <button className="button ghost" type="button" onClick={() => setActiveWorkspaceSection("history")}>
+                          점검 이력 보기
+                        </button>
+                      </div>
+                    </section>
+
+                    <div className="workspace-dashboard-board">
+                      <section className="panel workspace-dashboard-panel workspace-dashboard-panel-law">
+                        <div className="section-header workspace-dashboard-panel-header">
+                          <span className="workspace-dashboard-panel-badge">법령</span>
+                          <h2>법령 등록 현황</h2>
+                          <p>현재 등록된 법령 유형별 현황을 확인합니다.</p>
+                        </div>
+                        <div className="workspace-dashboard-stat-row">
+                          <div className="workspace-dashboard-stat-card">
+                            <span>법률</span>
+                            <strong>{dashboardLawCategoryCounts.법률}</strong>
                           </div>
-                          <div className="workspace-login-feature">
-                            <strong>비교덱 구성</strong>
-                            <p>비교 대상, 기준 문서, 기준 법령을 배치해 검토 실행 조건을 맞춥니다.</p>
+                          <div className="workspace-dashboard-stat-card">
+                            <span>시행령</span>
+                            <strong>{dashboardLawCategoryCounts.시행령}</strong>
                           </div>
-                          <div className="workspace-login-feature">
-                            <strong>검토 결과</strong>
-                            <p>1, 2, 3단계 AI 리포트와 비교 결과를 프레임 단위로 확인합니다.</p>
+                          <div className="workspace-dashboard-stat-card">
+                            <span>시행규칙</span>
+                            <strong>{dashboardLawCategoryCounts.시행규칙}</strong>
+                          </div>
+                          <div className="workspace-dashboard-stat-card">
+                            <span>기준</span>
+                            <strong>{dashboardLawCategoryCounts.기준}</strong>
+                          </div>
+                          <div className="workspace-dashboard-stat-card">
+                            <span>전체 법령</span>
+                            <strong>{dashboardRegisteredLaws.length}</strong>
+                          </div>
+                          <div className="workspace-dashboard-stat-card workspace-dashboard-stat-card-section-total">
+                            <span>전체 섹션</span>
+                            <strong>{dashboardLawSectionCount}</strong>
                           </div>
                         </div>
-                      </div>
-                      <AuthPanel session={session} />
+                        <div className="stack">
+                          {dashboardRecentLaws.length ? (
+                            dashboardRecentLaws.map((law) => (
+                              <div key={law.id} className="workspace-dashboard-record">
+                                <div>
+                                  <span className="muted-label">법령명</span>
+                                  <strong>{law.source_title ?? "제목 없음"}</strong>
+                                </div>
+                                <div className="workspace-dashboard-record-meta">
+                                  <span>{law.version_label ?? "버전 미기재"}</span>
+                                  <span>섹션 {law.section_count}개</span>
+                                </div>
+                              </div>
+                            ))
+                          ) : (
+                            <div className="workspace-dashboard-empty">
+                              <strong>등록된 법령이 없습니다.</strong>
+                              <p>비교 설정에서 기준 법령 URL을 먼저 등록하세요.</p>
+                            </div>
+                          )}
+                        </div>
+                      </section>
+
+                      <section className="panel workspace-dashboard-panel workspace-dashboard-panel-document">
+                        <div className="section-header workspace-dashboard-panel-header">
+                          <span className="workspace-dashboard-panel-badge">문서</span>
+                          <h2>정책 및 지침 등록 현황</h2>
+                          <p>정책과 지침을 구분해서 현재 등록 상태와 최근 문서를 보여줍니다.</p>
+                        </div>
+                        <div className="workspace-dashboard-stat-row">
+                          <div className="workspace-dashboard-stat-card">
+                            <span>정책</span>
+                            <strong>{dashboardDocumentCategoryCounts.정책}</strong>
+                          </div>
+                          <div className="workspace-dashboard-stat-card">
+                            <span>지침</span>
+                            <strong>{dashboardDocumentCategoryCounts.지침}</strong>
+                          </div>
+                          <div className="workspace-dashboard-stat-card workspace-dashboard-stat-card-section-total">
+                            <span>전체 섹션</span>
+                            <strong>{dashboardDocumentSectionCount}</strong>
+                          </div>
+                        </div>
+                        <div className="stack">
+                          {dashboardRecentDocuments.length ? (
+                            dashboardRecentDocuments.map((document) => (
+                              <button
+                                key={document.id}
+                                type="button"
+                                className="workspace-dashboard-record workspace-dashboard-record-button"
+                                onClick={() => {
+                                  setSelectedDocumentId(document.id);
+                                  setActiveWorkspaceSection("documents");
+                                }}
+                              >
+                                <div>
+                                  <span className="muted-label">{getDashboardDocumentCategory(document) ?? document.document_type}</span>
+                                  <strong>{document.title}</strong>
+                                </div>
+                                <div className="workspace-dashboard-record-meta">
+                                  <span>버전 {document.version_number}</span>
+                                  <span>섹션 {document.section_count}개</span>
+                                </div>
+                              </button>
+                            ))
+                          ) : (
+                            <div className="workspace-dashboard-empty">
+                              <strong>등록된 문서가 없습니다.</strong>
+                              <p>문서 관리에서 정책 또는 지침 문서를 업로드하세요.</p>
+                            </div>
+                          )}
+                        </div>
+                      </section>
+
+                      <section className="panel workspace-dashboard-panel workspace-dashboard-panel-history">
+                        <div className="section-header workspace-dashboard-panel-header">
+                          <span className="workspace-dashboard-panel-badge">History</span>
+                          <h2>최근 점검 이력</h2>
+                          <p>최근 수행한 점검 실행을 시간순으로 보고, 바로 결과 검토로 이동할 수 있습니다.</p>
+                        </div>
+                        <div className="stack">
+                          {dashboardRecentRuns.length ? (
+                            dashboardRecentRuns.map((run) => (
+                              <button
+                                key={run.id}
+                                type="button"
+                                className="workspace-dashboard-history-item"
+                                onClick={() => {
+                                  setSelectedComparisonRunId(run.comparisonRunIds[0] ?? null);
+                                  setActiveWorkspaceSection(run.comparisonRunIds.length ? "results" : "history");
+                                }}
+                              >
+                                <div className="workspace-dashboard-history-top">
+                                  <strong>{joinListForDisplay(run.targetTitles)}</strong>
+                                  <span>{formatDashboardDate(run.createdAt)}</span>
+                                </div>
+                                <p>{joinListForDisplay(run.referenceTitles)}</p>
+                                <div className="workspace-dashboard-history-meta">
+                                  <span>{run.reviewerEmail}</span>
+                                  <span>{run.comparisonRunIds.length ? `결과 ${run.comparisonRunIds.length}건` : "AI 비교 진행 중"}</span>
+                                </div>
+                              </button>
+                            ))
+                          ) : (
+                            <div className="workspace-dashboard-empty">
+                              <strong>최근 점검 이력이 없습니다.</strong>
+                              <p>비교 설정을 마친 뒤 첫 점검을 실행하면 이력이 쌓입니다.</p>
+                            </div>
+                          )}
+                        </div>
+                      </section>
                     </div>
                   </section>
                 ) : null}
@@ -1480,7 +1748,62 @@ export default function App() {
                   <section className="panel panel-wide workspace-body-card">
                     <div className="section-header workspace-section-header">
                       <h2>이력 관리</h2>
-                      <p>저장된 검토 결과 이력을 확인하고 다시 불러오거나 삭제합니다.</p>
+                      <p>검토 실행 시점의 비교 대상, 기준, 일시, 검토자를 실행 로그로 확인합니다.</p>
+                    </div>
+                    {reviewExecutionHistory.length ? (
+                      <div className="comparison-table-wrap comparison-history-table-wrap">
+                        <table className="comparison-data-table comparison-history-table">
+                          <thead>
+                            <tr>
+                              <th>비교 대상</th>
+                              <th>기준</th>
+                              <th>일시</th>
+                              <th>검토자</th>
+                              <th>결과</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {reviewExecutionHistory.map((entry) => (
+                              <tr key={entry.id}>
+                                <td>{joinListForDisplay(entry.targetTitles)}</td>
+                                <td>{joinListForDisplay(entry.referenceTitles)}</td>
+                                <td>{formatSavedHistoryTimestamp(entry.createdAt)}</td>
+                                <td>{entry.reviewerEmail}</td>
+                                <td>
+                                  {entry.comparisonRunIds.length ? (
+                                    <button
+                                      type="button"
+                                      className="button ghost"
+                                      onClick={() => {
+                                        setSelectedComparisonRunId(entry.comparisonRunIds[0] ?? null);
+                                        setActiveWorkspaceSection("results");
+                                      }}
+                                    >
+                                      결과 보기
+                                    </button>
+                                  ) : (
+                                    <span className="helper-text">AI 비교 진행 중</span>
+                                  )}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    ) : (
+                      <div className="empty-state">
+                        <strong>검토 실행 이력이 없습니다.</strong>
+                        <p>비교 설정에서 검토 실행을 시작하면 이력이 이곳에 기록됩니다.</p>
+                      </div>
+                    )}
+                  </section>
+                ) : null}
+
+                {activeWorkspaceSection === "aiHistory" ? (
+                  <section className="panel panel-wide workspace-body-card">
+                    <div className="section-header workspace-section-header">
+                      <h2>AI 리포트 이력</h2>
+                      <p>저장된 AI 비교 리포트를 다시 열거나 삭제합니다.</p>
                     </div>
                     <ComparisonReviewPanel
                       comparisonRunId={selectedComparisonRunId}
@@ -1613,16 +1936,16 @@ function writeWorkspaceSelection(userId: string, selection: PersistedWorkspaceSe
   );
 }
 
-function getWorkspaceFavoritesStorageKey(userId: string) {
-  return `policy-revision-mgmt-workspace-favorites:${userId}`;
+function getReviewExecutionHistoryStorageKey(userId: string) {
+  return `policy-revision-mgmt-review-execution-history:${userId}`;
 }
 
-function readWorkspaceFavorites(userId: string): WorkspaceFavorite[] {
+function readReviewExecutionHistory(userId: string): ReviewExecutionHistoryEntry[] {
   if (typeof window === "undefined") {
     return [];
   }
 
-  const raw = window.localStorage.getItem(getWorkspaceFavoritesStorageKey(userId));
+  const raw = window.localStorage.getItem(getReviewExecutionHistoryStorageKey(userId));
   if (!raw) {
     return [];
   }
@@ -1634,21 +1957,21 @@ function readWorkspaceFavorites(userId: string): WorkspaceFavorite[] {
     }
 
     return parsed
-      .map((entry) => normalizeWorkspaceFavorite(entry))
-      .filter((entry): entry is WorkspaceFavorite => entry !== null);
+      .map((entry) => normalizeReviewExecutionHistoryEntry(entry))
+      .filter((entry): entry is ReviewExecutionHistoryEntry => entry !== null);
   } catch {
     return [];
   }
 }
 
-function writeWorkspaceFavorites(userId: string, favorites: WorkspaceFavorite[]) {
+function writeReviewExecutionHistory(userId: string, entries: ReviewExecutionHistoryEntry[]) {
   if (typeof window === "undefined") {
     return;
   }
 
   window.localStorage.setItem(
-    getWorkspaceFavoritesStorageKey(userId),
-    JSON.stringify(favorites),
+    getReviewExecutionHistoryStorageKey(userId),
+    JSON.stringify(entries),
   );
 }
 
@@ -1666,45 +1989,33 @@ function createWorkspaceSelectionSnapshot(selection: PersistedWorkspaceSelection
   };
 }
 
-function normalizeWorkspaceFavorite(value: unknown): WorkspaceFavorite | null {
+function normalizeReviewExecutionHistoryEntry(value: unknown): ReviewExecutionHistoryEntry | null {
   if (!value || typeof value !== "object") {
     return null;
   }
 
-  const candidate = value as Partial<WorkspaceFavorite>;
+  const candidate = value as Partial<ReviewExecutionHistoryEntry>;
   if (
     typeof candidate.id !== "string" ||
-    typeof candidate.name !== "string" ||
-    typeof candidate.updatedAt !== "string"
+    typeof candidate.createdAt !== "string" ||
+    typeof candidate.reviewerEmail !== "string"
   ) {
     return null;
   }
 
   return {
     id: candidate.id,
-    name: candidate.name,
-    updatedAt: candidate.updatedAt,
-    selection: createWorkspaceSelectionSnapshot({
-      selectedDocumentId:
-        candidate.selection && typeof candidate.selection.selectedDocumentId === "string"
-          ? candidate.selection.selectedDocumentId
-          : null,
-      targetDocumentIds: Array.isArray(candidate.selection?.targetDocumentIds)
-        ? candidate.selection.targetDocumentIds.filter(
-            (entry): entry is string => typeof entry === "string",
-          )
-        : [],
-      referenceDocumentIds: Array.isArray(candidate.selection?.referenceDocumentIds)
-        ? candidate.selection.referenceDocumentIds.filter(
-            (entry): entry is string => typeof entry === "string",
-          )
-        : [],
-      lawVersionIds: Array.isArray(candidate.selection?.lawVersionIds)
-        ? candidate.selection.lawVersionIds.filter(
-            (entry): entry is string => typeof entry === "string",
-          )
-        : [],
-    }),
+    createdAt: candidate.createdAt,
+    reviewerEmail: candidate.reviewerEmail,
+    targetTitles: Array.isArray(candidate.targetTitles)
+      ? candidate.targetTitles.filter((entry): entry is string => typeof entry === "string")
+      : [],
+    referenceTitles: Array.isArray(candidate.referenceTitles)
+      ? candidate.referenceTitles.filter((entry): entry is string => typeof entry === "string")
+      : [],
+    comparisonRunIds: Array.isArray(candidate.comparisonRunIds)
+      ? candidate.comparisonRunIds.filter((entry): entry is string => typeof entry === "string")
+      : [],
   };
 }
 
@@ -1738,7 +2049,180 @@ function getWorkspaceActions(documentCount: number, lawCount: number) {
   return ["비교 대상과 기준을 구성한 뒤 비교를 실행하세요."];
 }
 
+function createReviewExecutionHistoryEntry(input: {
+  reviewerEmail: string;
+  targetTitles: string[];
+  referenceTitles: string[];
+}): ReviewExecutionHistoryEntry {
+  return {
+    id: crypto.randomUUID(),
+    createdAt: new Date().toISOString(),
+    reviewerEmail: input.reviewerEmail,
+    targetTitles: input.targetTitles,
+    referenceTitles: input.referenceTitles,
+    comparisonRunIds: [],
+  };
+}
+
+function joinListForDisplay(values: string[]) {
+  return values.length ? values.join(", ") : "-";
+}
+
+function getLatestRegisteredLaws(lawVersions: LawVersionSummary[]) {
+  const latestBySourceId = new Map<string, LawVersionSummary>();
+
+  lawVersions.forEach((lawVersion) => {
+    const existing = latestBySourceId.get(lawVersion.law_source_id);
+
+    if (!existing) {
+      latestBySourceId.set(lawVersion.law_source_id, lawVersion);
+      return;
+    }
+
+    const existingTime = new Date(existing.created_at).getTime();
+    const nextTime = new Date(lawVersion.created_at).getTime();
+
+    if (Number.isNaN(existingTime) || nextTime >= existingTime) {
+      latestBySourceId.set(lawVersion.law_source_id, lawVersion);
+    }
+  });
+
+  return [...latestBySourceId.values()].sort((left, right) => {
+    const leftTime = new Date(left.created_at).getTime();
+    const rightTime = new Date(right.created_at).getTime();
+
+    if (Number.isNaN(leftTime) || Number.isNaN(rightTime)) {
+      return 0;
+    }
+
+    return rightTime - leftTime;
+  });
+}
+
+function getLawDashboardCategory(lawVersion: Pick<LawVersionSummary, "source_title" | "source_link">) {
+  const candidates = [lawVersion.source_title, extractLawCategoryHint(lawVersion.source_link)];
+
+  for (const candidate of candidates) {
+    const category = getLawCategoryFromText(candidate);
+
+    if (category) {
+      return category;
+    }
+  }
+
+  return null;
+}
+
+function getDashboardDocumentCategory(document: Pick<DocumentSummary, "document_type" | "title">) {
+  const normalizedTitle = document.title.replace(/\s+/g, " ").trim();
+
+  if (/(정책|policy)/i.test(normalizedTitle)) {
+    return "정책";
+  }
+
+  if (/(지침|가이드라인|guideline)/i.test(normalizedTitle)) {
+    return "지침";
+  }
+
+  return null;
+}
+
+function getLawCategoryFromText(value: string | null) {
+  if (typeof value !== "string" || !value.trim()) {
+    return null;
+  }
+
+  const normalized = value
+    .replace(/\([^)]*\)/g, " ")
+    .replace(/\[[^\]]*\]/g, " ")
+    .replace(/[·•]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const compact = normalized.replace(/\s+/g, "");
+  const titleTail = compact
+    .replace(/제\d+(?:조|항|호)$/u, "")
+    .replace(/제\d+호(?:의\d+)?$/u, "")
+    .replace(/\d{4}\.\d{1,2}\.\d{1,2}\.?$/u, "")
+    .replace(/별표\d*(?:의\d+)?$/u, "")
+    .replace(/별지\d*(?:의\d+)?$/u, "")
+    .replace(/부칙$/u, "")
+    .trim();
+
+  if (/시행규칙(?:$|제\d)/u.test(titleTail) || titleTail.includes("시행규칙")) {
+    return "시행규칙";
+  }
+
+  if (/시행령(?:$|제\d)/u.test(titleTail) || titleTail.includes("시행령")) {
+    return "시행령";
+  }
+
+  if (/(기준|고시|훈령|예규|세칙|규정|조례|규칙)(?:$|제\d)/u.test(titleTail)) {
+    return "기준";
+  }
+
+  if (/(법률|법)(?:$|제\d)/u.test(titleTail)) {
+    return "법률";
+  }
+
+  return null;
+}
+
+function extractLawCategoryHint(sourceLink: string) {
+  if (!sourceLink) {
+    return null;
+  }
+
+  const lastSegment = sourceLink.split("/").pop() ?? "";
+  const withoutQuery = lastSegment.split("?")[0] ?? "";
+  const withoutExtension = withoutQuery.replace(/\.[^.]+$/, "");
+
+  try {
+    return decodeURIComponent(withoutExtension);
+  } catch {
+    return withoutExtension;
+  }
+}
+
+function formatDashboardDate(value: string) {
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+
+  return new Intl.DateTimeFormat("ko-KR", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
+}
+
+function formatSavedHistoryTimestamp(value: string) {
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+
+  return new Intl.DateTimeFormat("ko-KR", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
+}
+
 function getWorkspaceSectionMeta(section: WorkspaceSection) {
+  if (section === "dashboard") {
+    return {
+      kicker: "대시보드",
+      title: "대시보드",
+      description: "문서, 기준 법령, 비교 준비 상태와 최근 실행 결과를 한 화면에서 확인합니다.",
+    };
+  }
+
   if (section === "documents") {
     return {
       kicker: "문서 관리",
@@ -1749,8 +2233,8 @@ function getWorkspaceSectionMeta(section: WorkspaceSection) {
 
   if (section === "comparison") {
     return {
-      kicker: "비교덱 구성",
-      title: "비교덱 구성",
+      kicker: "비교 설정",
+      title: "비교 설정",
       description: "비교 대상과 기준 문서, 기준 법률을 한 화면에서 배치하고 실행합니다.",
     };
   }
@@ -1767,7 +2251,15 @@ function getWorkspaceSectionMeta(section: WorkspaceSection) {
     return {
       kicker: "이력 관리",
       title: "이력 관리",
-      description: "저장된 검토 결과 이력을 확인하고 다시 불러오거나 삭제합니다.",
+      description: "검토 실행 시점의 비교 대상, 기준, 일시, 검토자를 실행 이력으로 확인합니다.",
+    };
+  }
+
+  if (section === "aiHistory") {
+    return {
+      kicker: "AI 리포트 이력",
+      title: "AI 리포트 이력",
+      description: "저장한 AI 비교 리포트를 다시 열거나 삭제합니다.",
     };
   }
 

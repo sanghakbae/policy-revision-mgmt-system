@@ -10,7 +10,7 @@ export function PromptSettingsPanel(input: PromptSettingsPanelProps) {
   return (
     <section className="comparison-result-columns">
       {([
-        ["left", "1단계", "검토 비교 대상 정리", "비교 대상 문서 정리 프롬프트를 설정합니다."],
+        ["left", "1단계", "비교 대상 정리", "비교 대상 문서 정리 프롬프트를 설정합니다."],
         ["right", "2단계", "기준 정리", "기준 문서와 법령 정리 프롬프트를 설정합니다."],
         ["final", "3단계", "최종 비교 리포트", "최종 비교 리포트 생성 프롬프트를 설정합니다."],
       ] as const).map(([stage, stepLabel, title, description]) => (
