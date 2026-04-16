@@ -294,12 +294,13 @@ VITE_SUPABASE_ANON_KEY
 
 예상 배포 주소:
 
-- `https://sanghakbae.github.io/policy-revision-mgmt-system/`
+- `https://policy.sanghak.kr/`
 
 GitHub Pages가 아직 안 뜨면 아래를 확인해야 합니다.
 
 - Repository `Settings > Pages`
 - Source가 `GitHub Actions`인지 확인
+- Custom domain이 `policy.sanghak.kr`로 설정되어 있는지 확인
 - Repository Secrets에 `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`가 등록되어 있는지 확인
 
 ## 검증 명령

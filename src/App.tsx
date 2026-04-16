@@ -72,7 +72,35 @@ type WorkspaceSection =
   | "aiHistory"
   | "settings";
 
-export default function App() {
+function getPortalWorkspaceSection(
+  embeddedContext?: { project?: string; view?: string; embedded?: boolean },
+): WorkspaceSection | null {
+  if (!embeddedContext?.embedded) {
+    return null;
+  }
+
+  const validSections: WorkspaceSection[] = [
+    "documents",
+    "comparison",
+    "results",
+    "history",
+    "settings",
+  ];
+
+  return validSections.includes(embeddedContext.view as WorkspaceSection)
+    ? (embeddedContext.view as WorkspaceSection)
+    : null;
+}
+
+function isPortalEmbeddedWorkspace(
+  embeddedContext?: { project?: string; view?: string; embedded?: boolean },
+) {
+  return Boolean(embeddedContext?.embedded);
+}
+
+export default function App({ embeddedContext }: { embeddedContext?: { project?: string; view?: string; embedded?: boolean } } = {}) {
+  const embeddedWorkspace = isPortalEmbeddedWorkspace(embeddedContext);
+  const portalWorkspaceSection = getPortalWorkspaceSection(embeddedContext);
   const emptyComparisonAnalysisState: ComparisonReviewAnalysisState = {
     aiGuidance: null,
     leftGroupReport: null,
@@ -85,7 +113,16 @@ export default function App() {
     analysisStagePhase: null,
     analysisStageStartedAt: null,
   };
-  const [session, setSession] = useState<Session | null>(null);
+  const [session, setSession] = useState<Session | null>(
+    embeddedWorkspace
+      ? ({
+          user: {
+            id: "portal-guest",
+            email: "portal@local",
+          },
+        } as Session)
+      : null,
+  );
   const [documents, setDocuments] = useState<DocumentSummary[]>([]);
   const [comparisonRuns, setComparisonRuns] = useState<ComparisonRunSummary[]>([]);
   const [lawVersions, setLawVersions] = useState<LawVersionSummary[]>([]);
@@ -108,7 +145,9 @@ export default function App() {
   const [workspaceSelectionHydrated, setWorkspaceSelectionHydrated] = useState(false);
   const [workspaceFavorites, setWorkspaceFavorites] = useState<WorkspaceFavorite[]>([]);
   const [reviewExecutionHistory, setReviewExecutionHistory] = useState<ReviewExecutionHistoryEntry[]>([]);
-  const [activeWorkspaceSection, setActiveWorkspaceSection] = useState<WorkspaceSection>("dashboard");
+  const [activeWorkspaceSection, setActiveWorkspaceSection] = useState<WorkspaceSection>(
+    () => portalWorkspaceSection ?? "dashboard",
+  );
   const [appNotice, setAppNoticeState] = useState<AppNotice | null>(null);
   const [comparisonOverview, setComparisonOverview] = useState<ComparisonReviewOverviewSnapshot | null>(null);
   const [comparisonAnalysisState, setComparisonAnalysisState] = useState<ComparisonReviewAnalysisState>(
@@ -154,6 +193,22 @@ export default function App() {
   }
 
   useEffect(() => {
+    if (embeddedWorkspace) {
+      setSession({
+        user: {
+          id: "portal-guest",
+          email: "portal@local",
+        },
+      } as Session);
+      setAppNotice({
+        tone: "info",
+        label: "포털 모드",
+        title: "로그인 없이 전체 화면을 표시합니다.",
+        detail: "문서 관리, 비교덱 구성, 검토 결과, 이력 관리, 설정을 모두 볼 수 있습니다.",
+      });
+      return;
+    }
+
     if (!isSupabaseConfigured) {
       setAppNotice({
         tone: "warning",
@@ -297,7 +352,23 @@ export default function App() {
       cancelled = true;
       subscription.unsubscribe();
     };
-  }, [isSupabaseConfigured]);
+  }, [embeddedWorkspace, isSupabaseConfigured]);
+
+  useEffect(() => {
+    if (!embeddedWorkspace) {
+      return;
+    }
+
+    setActiveWorkspaceSection(portalWorkspaceSection ?? "dashboard");
+  }, [embeddedWorkspace, portalWorkspaceSection]);
+
+  useEffect(() => {
+    if (!embeddedWorkspace) {
+      return;
+    }
+
+    setActiveWorkspaceSection(portalWorkspaceSection ?? "documents");
+  }, [embeddedWorkspace, portalWorkspaceSection]);
 
   useEffect(() => {
     if (!isSupabaseConfigured) {
@@ -1310,7 +1381,7 @@ export default function App() {
     },
   ];
   const activeWorkspaceMeta = getWorkspaceSectionMeta(activeWorkspaceSection);
-  const showWorkspaceNavigation = Boolean(session) && isSupabaseConfigured;
+  const showWorkspaceNavigation = Boolean(session) || embeddedWorkspace;
   const headerStatus = appNotice ?? {
     tone: "info" as const,
     label: "진행 현황",
