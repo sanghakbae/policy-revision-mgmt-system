@@ -336,6 +336,7 @@ export function ComparisonReviewPanel({
           apiCallCount={displayedApiCallCount}
           className="ai-guidance-offset"
           onSaveCurrentReport={handleSaveCurrentReport}
+          isHistoryView={shouldShowHistory}
         />
       </div>
     );
@@ -355,6 +356,7 @@ export function ComparisonReviewPanel({
           apiCallCount={displayedApiCallCount}
           className="ai-guidance-offset"
           onSaveCurrentReport={handleSaveCurrentReport}
+          isHistoryView={shouldShowHistory}
         />
       </div>
     );
@@ -453,6 +455,7 @@ export function ComparisonReviewPanel({
             apiCallCount={displayedApiCallCount}
             className="ai-guidance-offset"
             onSaveCurrentReport={handleSaveCurrentReport}
+            isHistoryView={shouldShowHistory}
           />
         ) : null}
       </div>
@@ -481,6 +484,7 @@ export function ComparisonReviewPanel({
           apiCallCount={displayedApiCallCount}
           className="ai-guidance-offset"
           onSaveCurrentReport={handleSaveCurrentReport}
+          isHistoryView={shouldShowHistory}
         />
       </div>
     );
@@ -605,6 +609,7 @@ export function ComparisonReviewPanel({
           apiCallCount={displayedApiCallCount}
           className="ai-guidance-offset"
           onSaveCurrentReport={handleSaveCurrentReport}
+          isHistoryView={shouldShowHistory}
         />
       ) : null}
     </div>
@@ -622,6 +627,7 @@ function AiGuidancePanel(input: {
   apiCallCount: number;
   className?: string;
   onSaveCurrentReport: () => void;
+  isHistoryView?: boolean;
 }) {
   return (
     <section className={`review-column comparison-ai-shell ${input.className ?? ""}`.trim()}>
@@ -645,6 +651,7 @@ function AiGuidancePanel(input: {
             evidencePairs: normalizeRequirementEvidencePairs(item),
             notes: item.notes,
           }))}
+          isHistoryView={input.isHistoryView}
         />
         <GroupReportSection
           stepLabel="2단계"
@@ -665,6 +672,7 @@ function AiGuidancePanel(input: {
             evidencePairs: normalizeRequirementEvidencePairs(item),
             notes: item.notes,
           }))}
+          isHistoryView={input.isHistoryView}
         />
         <ComparisonReportSection
           stepLabel="3단계"
@@ -675,6 +683,7 @@ function AiGuidancePanel(input: {
           apiCallCount={input.apiCallCount}
           model={input.guidance?.model ?? "미기록"}
           analysisStageLabel={input.error ?? input.analysisStageLabel}
+          isHistoryView={input.isHistoryView}
         />
       </div>
     </section>
@@ -817,7 +826,10 @@ function GroupReportSection(input: {
   keyFindings: string[];
   documents: GroupDocumentItem[];
   requirements: GroupRequirementItem[];
+  isHistoryView?: boolean;
 }) {
+  const documentRows = buildDocumentRows(input.documents);
+  const requirementRows = buildRequirementRows(input.requirements);
   return (
     <section
       className={`review-column comparison-source-column comparison-review-stage-frame comparison-report-block ${input.frameClassName ?? ""}`.trim()}
@@ -827,6 +839,21 @@ function GroupReportSection(input: {
           <h3>{input.title}</h3>
           <span className="comparison-report-stage-step">{input.stepLabel}</span>
         </div>
+        {input.isHistoryView ? (
+          <button
+            type="button"
+            className="button ghost"
+            onClick={() =>
+              downloadCsv(`${input.title}.csv`, ["구분", "항목1", "항목2", "항목3", "항목4", "항목5"], [
+                ...input.keyFindings.map((item, index) => ["핵심 정리", String(index + 1), item, "", "", ""]),
+                ...documentRows.map((row) => ["문서별 정리", row[0], row[1], row[2], "", ""]),
+                ...requirementRows.map((row) => ["통합 요구사항", row[0], row[1], row[2], row[3], row[4]]),
+              ])
+            }
+          >
+            CSV 내보내기
+          </button>
+        ) : null}
         <p>{input.description}</p>
       </div>
       <SummarySection summary={input.summary} emptyText="요약이 없습니다." />
@@ -835,6 +862,7 @@ function GroupReportSection(input: {
         columns={["번호", "내용"]}
         rows={input.keyFindings.map((item, index) => [String(index + 1), item])}
         emptyText="핵심 정리 항목이 없습니다."
+        leftAlignValues={input.isHistoryView}
       />
       <section className="review-column">
         <div className="section-header compact-section-header">
@@ -843,9 +871,10 @@ function GroupReportSection(input: {
         <ReportTableSection
           title=""
           columns={["문서", "핵심 정리", "근거 경로"]}
-          rows={buildDocumentRows(input.documents)}
+          rows={documentRows}
           emptyText="문서별 정리 항목이 없습니다."
           hideTitle
+          leftAlignValues={input.isHistoryView}
         />
       </section>
       <section className="review-column">
@@ -855,9 +884,10 @@ function GroupReportSection(input: {
         <ReportTableSection
           title=""
           columns={["주제", "내용", "출처 문서", "근거 경로", "비고"]}
-          rows={buildRequirementRows(input.requirements)}
+          rows={requirementRows}
           emptyText="통합 요구사항이 없습니다."
           hideTitle
+          leftAlignValues={input.isHistoryView}
         />
       </section>
     </section>
@@ -873,6 +903,7 @@ function ComparisonReportSection(input: {
   apiCallCount: number;
   model: string;
   analysisStageLabel: string | null;
+  isHistoryView?: boolean;
 }) {
   const report = input.guidance;
 
@@ -885,6 +916,55 @@ function ComparisonReportSection(input: {
           <h3>{input.title}</h3>
           <span className="comparison-report-stage-step">{input.stepLabel}</span>
         </div>
+        {input.isHistoryView ? (
+          <button
+            type="button"
+            className="button ghost"
+            onClick={() =>
+              downloadCsv(`${input.title}.csv`, ["구분", "항목1", "항목2", "항목3", "항목4", "항목5", "항목6", "항목7", "항목8"], [
+                ...(report?.gaps ?? []).map((item) => [
+                  "개정 필요 항목",
+                  item.topic,
+                  item.target_document_title,
+                  item.target_section_path,
+                  item.recommended_revision,
+                  item.revision_example,
+                  item.right_requirement,
+                  item.left_current_state,
+                  item.risk,
+                ]),
+                ...(report?.well_covered_items ?? []).map((item) => [
+                  "이미 충분히 반영된 항목",
+                  item.topic,
+                  item.reason,
+                  joinListForCell(item.policy_evidence_paths),
+                  joinListForCell(item.comparison_evidence_paths),
+                  "",
+                  "",
+                  "",
+                  "",
+                ]),
+                ...(report?.document_actions ?? []).flatMap((item) =>
+                  item.actions.map((action) => [
+                    "문서별 조치",
+                    item.document_title,
+                    action.target_section_path,
+                    action.action,
+                    action.instruction,
+                    action.draft_revision_text,
+                    action.current_issue,
+                    action.required_change,
+                    action.rationale,
+                  ]),
+                ),
+                ...(report?.remaining_watchpoints ?? []).map((item, index) => ["남은 관찰 포인트", String(index + 1), item, "", "", "", "", "", ""]),
+                ...(report?.low_confidence_notes ?? []).map((item, index) => ["저신뢰 메모", String(index + 1), item, "", "", "", "", "", ""]),
+              ])
+            }
+          >
+            CSV 내보내기
+          </button>
+        ) : null}
         <p>{input.description}</p>
       </div>
       <SummarySection
@@ -914,6 +994,7 @@ function ComparisonReportSection(input: {
           confidence: item.confidence,
           reason: `${item.gap_type} | 우선순위: ${item.priority}\n기준 요구사항: ${item.right_requirement}\n현재 상태: ${item.left_current_state}\n위험: ${item.risk}`,
         }))}
+        leftAlignValues={input.isHistoryView}
       />
       <ReportTableSection
         title="이미 충분히 반영된 항목"
@@ -925,18 +1006,21 @@ function ComparisonReportSection(input: {
           joinListForCell(item.comparison_evidence_paths),
         ])}
         emptyText="이미 충분히 반영된 항목이 없습니다."
+        leftAlignValues={input.isHistoryView}
       />
       <ReportTableSection
         title="남은 관찰 포인트"
         columns={["번호", "내용"]}
         rows={(report?.remaining_watchpoints ?? []).map((item, index) => [String(index + 1), item])}
         emptyText="남은 관찰 포인트가 없습니다."
+        leftAlignValues={input.isHistoryView}
       />
       <ReportTableSection
         title="저신뢰 메모"
         columns={["번호", "내용"]}
         rows={(report?.low_confidence_notes ?? []).map((item, index) => [String(index + 1), item])}
         emptyText="저신뢰 메모가 없습니다."
+        leftAlignValues={input.isHistoryView}
       />
       <ReportTableSection
         title="문서별 조치"
@@ -955,6 +1039,7 @@ function ComparisonReportSection(input: {
           ]),
         )}
         emptyText="문서별 조치가 없습니다."
+        leftAlignValues={input.isHistoryView}
       />
     </section>
   );
@@ -1141,6 +1226,7 @@ function GuidanceSection(input: {
   emptyText: string;
   emptyReason: string;
   items: GuidanceItem[];
+  leftAlignValues?: boolean;
 }) {
   return (
     <section className="review-column">
@@ -1162,6 +1248,7 @@ function GuidanceSection(input: {
           rows={buildGuidanceRows(input.items)}
           emptyText={input.emptyText}
           hideTitle
+          leftAlignValues={input.leftAlignValues}
         />
       )}
     </section>
@@ -1174,6 +1261,7 @@ function ReportTableSection(input: {
   rows: string[][];
   emptyText: string;
   hideTitle?: boolean;
+  leftAlignValues?: boolean;
 }) {
   return (
     <section className="review-column comparison-table-section">
@@ -1183,7 +1271,7 @@ function ReportTableSection(input: {
         </div>
       ) : null}
       <div className="comparison-table-wrap">
-        <table className="comparison-data-table">
+        <table className={`comparison-data-table ${input.leftAlignValues ? "comparison-data-table-left-values" : ""}`.trim()}>
           <thead>
             <tr>
               {input.columns.map((column) => (
@@ -1217,6 +1305,33 @@ function ReportTableSection(input: {
       </div>
     </section>
   );
+}
+
+function escapeCsvCell(value: string) {
+  const normalized = value.replace(/\r\n/g, "\n");
+  if (/[",\n]/.test(normalized)) {
+    return `"${normalized.replace(/"/g, "\"\"")}"`;
+  }
+  return normalized;
+}
+
+function downloadCsv(fileName: string, columns: string[], rows: string[][]) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  const csv = [columns, ...rows]
+    .map((row) => row.map((cell) => escapeCsvCell(String(cell ?? ""))).join(","))
+    .join("\n");
+  const blob = new Blob(["\uFEFF", csv], { type: "text/csv;charset=utf-8;" });
+  const url = window.URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = fileName;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  window.URL.revokeObjectURL(url);
 }
 
 function SummarySection(input: { summary: string; emptyText: string }) {

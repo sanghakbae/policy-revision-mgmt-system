@@ -1000,9 +1000,9 @@ textarea {
 .workspace-dashboard-history-item {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 4px;
   width: 100%;
-  padding: 13px 14px;
+  padding: 9px 11px;
   border: 1px solid rgba(24, 34, 45, 0.06);
   border-radius: 16px;
   background: rgba(250, 251, 252, 0.9);
@@ -1012,19 +1012,19 @@ textarea {
 .workspace-dashboard-record strong,
 .workspace-dashboard-history-item strong {
   display: block;
-  margin-top: 2px;
+  margin-top: 0;
   font-size: 14px;
-  line-height: 1.35;
+  line-height: 1.25;
 }
 
 .workspace-dashboard-record-meta,
 .workspace-dashboard-history-meta {
   display: flex;
-  gap: 8px;
+  gap: 6px;
   flex-wrap: wrap;
   color: #667788;
   font-size: 11px;
-  line-height: 1.3;
+  line-height: 1.2;
 }
 
 .workspace-dashboard-record-button {
@@ -2682,6 +2682,10 @@ textarea {
   color: #18222d;
   font-weight: 700;
   text-align: center;
+}
+
+.comparison-data-table-left-values tbody td {
+  text-align: left;
 }
 
 .comparison-data-table tbody tr:last-child td {
