@@ -53,13 +53,17 @@ interface GroupReportResponse {
 interface ComparisonGapItem {
   topic: string;
   gap_type: string;
+  priority: string;
   right_requirement: string;
   left_current_state: string;
   risk: string;
   target_document_id: string;
   target_document_title: string;
   target_section_path: string;
+  target_section_reason: string;
   recommended_revision: string;
+  revision_instruction: string;
+  revision_example: string;
   policy_evidence_paths: string[];
   comparison_source_title: string;
   comparison_evidence_paths: string[];
@@ -77,9 +81,14 @@ interface ComparisonDocumentAction {
   document_id: string;
   document_title: string;
   actions: Array<{
+    priority: string;
     target_section_path: string;
+    current_issue: string;
     action: string;
+    required_change: string;
     instruction: string;
+    draft_revision_text: string;
+    rationale: string;
   }>;
 }
 
@@ -476,7 +485,7 @@ async function analyzeComparison(input: {
   instructions: string;
 }) {
   const payload = {
-    task: "좌우 그룹 상세 비교",
+    task: "비교 대상과 기준 상세 비교",
     left_group_report: input.leftGroupReport,
     right_group_report: input.rightGroupReport,
   };
@@ -502,13 +511,17 @@ async function analyzeComparison(input: {
             properties: {
               topic: { type: "string" },
               gap_type: { type: "string" },
+              priority: { type: "string" },
               right_requirement: { type: "string" },
               left_current_state: { type: "string" },
               risk: { type: "string" },
               target_document_id: { type: "string" },
               target_document_title: { type: "string" },
               target_section_path: { type: "string" },
+              target_section_reason: { type: "string" },
               recommended_revision: { type: "string" },
+              revision_instruction: { type: "string" },
+              revision_example: { type: "string" },
               policy_evidence_paths: { type: "array", items: { type: "string" } },
               comparison_source_title: { type: "string" },
               comparison_evidence_paths: { type: "array", items: { type: "string" } },
@@ -517,13 +530,17 @@ async function analyzeComparison(input: {
             required: [
               "topic",
               "gap_type",
+              "priority",
               "right_requirement",
               "left_current_state",
               "risk",
               "target_document_id",
               "target_document_title",
               "target_section_path",
+              "target_section_reason",
               "recommended_revision",
+              "revision_instruction",
+              "revision_example",
               "policy_evidence_paths",
               "comparison_source_title",
               "comparison_evidence_paths",
@@ -559,11 +576,25 @@ async function analyzeComparison(input: {
                   type: "object",
                   additionalProperties: false,
                   properties: {
+                    priority: { type: "string" },
                     target_section_path: { type: "string" },
+                    current_issue: { type: "string" },
                     action: { type: "string" },
+                    required_change: { type: "string" },
                     instruction: { type: "string" },
+                    draft_revision_text: { type: "string" },
+                    rationale: { type: "string" },
                   },
-                  required: ["target_section_path", "action", "instruction"],
+                  required: [
+                    "priority",
+                    "target_section_path",
+                    "current_issue",
+                    "action",
+                    "required_change",
+                    "instruction",
+                    "draft_revision_text",
+                    "rationale",
+                  ],
                 },
               },
             },
@@ -749,13 +780,17 @@ function validateComparisonReportResponse(value: unknown): ComparisonReportRespo
       return {
         topic: requireString("topic", item),
         gap_type: requireString("gap_type", item),
+        priority: requireString("priority", item),
         right_requirement: requireString("right_requirement", item),
         left_current_state: requireString("left_current_state", item),
         risk: requireString("risk", item),
         target_document_id: typeof item.target_document_id === "string" ? item.target_document_id : "",
         target_document_title: requireString("target_document_title", item),
         target_section_path: requireString("target_section_path", item),
+        target_section_reason: requireString("target_section_reason", item),
         recommended_revision: requireString("recommended_revision", item),
+        revision_instruction: requireString("revision_instruction", item),
+        revision_example: requireString("revision_example", item),
         policy_evidence_paths: requireStringArray("policy_evidence_paths", 0, item),
         comparison_source_title: requireString("comparison_source_title", item),
         comparison_evidence_paths: requireStringArray("comparison_evidence_paths", 0, item),
@@ -792,9 +827,14 @@ function validateComparisonReportResponse(value: unknown): ComparisonReportRespo
           }
           const nestedItem = nested as Record<string, unknown>;
           return {
+            priority: requireString("priority", nestedItem),
             target_section_path: requireString("target_section_path", nestedItem),
+            current_issue: requireString("current_issue", nestedItem),
             action: requireString("action", nestedItem),
+            required_change: requireString("required_change", nestedItem),
             instruction: requireString("instruction", nestedItem),
+            draft_revision_text: requireString("draft_revision_text", nestedItem),
+            rationale: requireString("rationale", nestedItem),
           };
         }),
       };

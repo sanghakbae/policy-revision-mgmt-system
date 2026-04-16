@@ -788,11 +788,15 @@ function SavedAnalysisHistorySection(input: {
 type GuidanceItem = {
   id: string;
   title: string;
+  priority: string;
   targetPath: string;
+  targetPathReason: string;
   comparisonSourceTitle: string;
   policyEvidence: string[];
   comparisonEvidence: string[];
   action: string;
+  actionInstruction: string;
+  actionExample: string;
   confidence: number;
   reason: string;
 };
@@ -911,13 +915,17 @@ function ComparisonReportSection(input: {
         items={(report?.gaps ?? []).map((item, index) => ({
           id: `gap-${index}-${item.topic}`,
           title: `${item.topic} · ${item.target_document_title}`,
+          priority: item.priority,
           targetPath: item.target_section_path,
+          targetPathReason: item.target_section_reason,
           comparisonSourceTitle: item.comparison_source_title,
           policyEvidence: item.policy_evidence_paths,
           comparisonEvidence: item.comparison_evidence_paths,
           action: item.recommended_revision,
+          actionInstruction: item.revision_instruction,
+          actionExample: item.revision_example,
           confidence: item.confidence,
-          reason: `${item.gap_type} | 기준 요구사항: ${item.right_requirement}\n현재 상태: ${item.left_current_state}\n위험: ${item.risk}`,
+          reason: `${item.gap_type} | 우선순위: ${item.priority}\n기준 요구사항: ${item.right_requirement}\n현재 상태: ${item.left_current_state}\n위험: ${item.risk}`,
         }))}
       />
       <ReportTableSection
@@ -934,14 +942,19 @@ function ComparisonReportSection(input: {
       <ReportTableSection
         title="문서별 조치"
         columns={["문서", "조치"]}
-        rows={(report?.document_actions ?? []).map((item) => [
-          item.document_title,
-          joinListForCell(
-            item.actions.map(
-              (action) => `[${action.action}] ${action.target_section_path} - ${action.instruction}`,
-            ),
-          ),
-        ])}
+        rows={(report?.document_actions ?? []).flatMap((item) =>
+          item.actions.map((action, index) => [
+            index === 0 ? item.document_title : "",
+            [
+              `[${action.priority}] [${action.action}] ${action.target_section_path}`,
+              `문제: ${action.current_issue}`,
+              `필수 변경: ${action.required_change}`,
+              `수정 지시: ${action.instruction}`,
+              `예시 문안: ${action.draft_revision_text}`,
+              `근거: ${action.rationale}`,
+            ].join("\n"),
+          ]),
+        )}
         emptyText="문서별 조치가 없습니다."
       />
       <ReportTableSection
@@ -1158,7 +1171,7 @@ function GuidanceSection(input: {
       ) : (
         <ReportTableSection
           title=""
-          columns={["주제", "대상 경로", "기준", "정책 근거", "기준 근거", "조치", "신뢰도", "사유"]}
+          columns={["주제", "수정 위치", "기준", "정책 근거", "기준 근거", "권고", "예시 문안", "신뢰도", "판단 근거"]}
           rows={buildGuidanceRows(input.items)}
           emptyText={input.emptyText}
           hideTitle
@@ -1314,11 +1327,12 @@ function buildGuidanceRows(items: GuidanceItem[]) {
     const rowCount = Math.max(item.policyEvidence.length, item.comparisonEvidence.length, 1);
     return Array.from({ length: rowCount }, (_, index) => [
       index === 0 ? item.title : "",
-      index === 0 ? item.targetPath : "",
+      index === 0 ? `${item.targetPath}\n${item.targetPathReason}`.trim() : "",
       index === 0 ? item.comparisonSourceTitle : "",
       item.policyEvidence[index] ?? "",
       item.comparisonEvidence[index] ?? "",
-      index === 0 ? item.action : "",
+      index === 0 ? `[${item.priority}] ${item.action}\n${item.actionInstruction}`.trim() : "",
+      index === 0 ? item.actionExample : "",
       index === 0 ? `${Math.round(item.confidence * 100)}%` : "",
       index === 0 ? item.reason : "",
     ]).filter((row, index) =>

@@ -57,6 +57,7 @@ interface ReviewExecutionHistoryRow {
   target_titles: string[] | null;
   reference_titles: string[] | null;
   comparison_run_ids: string[] | null;
+  result_status: ReviewExecutionHistoryEntry["resultStatus"] | null;
   created_at: string;
 }
 
@@ -340,7 +341,7 @@ export async function listReviewExecutionHistory(): Promise<ReviewExecutionHisto
   const supabase = getSupabaseClient();
   const { data, error } = await supabase
     .from("policy_review_execution_history")
-    .select("id, reviewer_email, target_titles, reference_titles, comparison_run_ids, created_at")
+    .select("id, reviewer_email, target_titles, reference_titles, comparison_run_ids, result_status, created_at")
     .order("created_at", { ascending: false });
 
   if (error) {
@@ -354,6 +355,7 @@ export async function listReviewExecutionHistory(): Promise<ReviewExecutionHisto
     targetTitles: row.target_titles ?? [],
     referenceTitles: row.reference_titles ?? [],
     comparisonRunIds: row.comparison_run_ids ?? [],
+    resultStatus: row.result_status ?? ((row.comparison_run_ids?.length ?? 0) > 0 ? "comparison_completed" : "pending"),
   }));
 }
 
@@ -362,6 +364,7 @@ export async function saveReviewExecutionHistoryEntry(input: {
   targetTitles: string[];
   referenceTitles: string[];
   comparisonRunIds: string[];
+  resultStatus?: ReviewExecutionHistoryEntry["resultStatus"];
 }) {
   const session = await ensureAuthenticatedSession();
   const currentUser = await ensureAuthenticatedUser(session.access_token);
@@ -374,8 +377,10 @@ export async function saveReviewExecutionHistoryEntry(input: {
       target_titles: input.targetTitles,
       reference_titles: input.referenceTitles,
       comparison_run_ids: input.comparisonRunIds,
+      result_status:
+        input.resultStatus ?? (input.comparisonRunIds.length > 0 ? "comparison_completed" : "pending"),
     })
-    .select("id, reviewer_email, target_titles, reference_titles, comparison_run_ids, created_at")
+    .select("id, reviewer_email, target_titles, reference_titles, comparison_run_ids, result_status, created_at")
     .single();
 
   if (error || !data) {
@@ -390,22 +395,23 @@ export async function saveReviewExecutionHistoryEntry(input: {
     targetTitles: row.target_titles ?? [],
     referenceTitles: row.reference_titles ?? [],
     comparisonRunIds: row.comparison_run_ids ?? [],
+    resultStatus: row.result_status ?? ((row.comparison_run_ids?.length ?? 0) > 0 ? "comparison_completed" : "pending"),
   } satisfies ReviewExecutionHistoryEntry;
 }
 
-export async function updateReviewExecutionHistoryComparisonRuns(input: {
+export async function updateReviewExecutionHistoryStatus(input: {
   entryId: string;
-  comparisonRunIds: string[];
+  resultStatus: ReviewExecutionHistoryEntry["resultStatus"];
 }) {
   await ensureAuthenticatedSession();
   const supabase = getSupabaseClient();
   const { data, error } = await supabase
     .from("policy_review_execution_history")
     .update({
-      comparison_run_ids: input.comparisonRunIds,
+      result_status: input.resultStatus,
     })
     .eq("id", input.entryId)
-    .select("id, reviewer_email, target_titles, reference_titles, comparison_run_ids, created_at")
+    .select("id, reviewer_email, target_titles, reference_titles, comparison_run_ids, result_status, created_at")
     .single();
 
   if (error || !data) {
@@ -420,6 +426,7 @@ export async function updateReviewExecutionHistoryComparisonRuns(input: {
     targetTitles: row.target_titles ?? [],
     referenceTitles: row.reference_titles ?? [],
     comparisonRunIds: row.comparison_run_ids ?? [],
+    resultStatus: row.result_status ?? ((row.comparison_run_ids?.length ?? 0) > 0 ? "comparison_completed" : "pending"),
   } satisfies ReviewExecutionHistoryEntry;
 }
 
@@ -1154,6 +1161,7 @@ function normalizeAiRevisionGuidance(input: unknown): AiRevisionGuidance {
             return {
               topic: typeof item.topic === "string" ? item.topic : "항목",
               gap_type: typeof item.gap_type === "string" ? item.gap_type : "missing",
+              priority: typeof item.priority === "string" ? item.priority : "중",
               right_requirement:
                 typeof item.right_requirement === "string" ? item.right_requirement : "",
               left_current_state:
@@ -1167,10 +1175,16 @@ function normalizeAiRevisionGuidance(input: unknown): AiRevisionGuidance {
                   : "정책/지침",
               target_section_path:
                 typeof item.target_section_path === "string" ? item.target_section_path : "미지정",
+              target_section_reason:
+                typeof item.target_section_reason === "string" ? item.target_section_reason : "",
               recommended_revision:
                 typeof item.recommended_revision === "string"
                   ? item.recommended_revision
                   : "",
+              revision_instruction:
+                typeof item.revision_instruction === "string" ? item.revision_instruction : "",
+              revision_example:
+                typeof item.revision_example === "string" ? item.revision_example : "",
               policy_evidence_paths: normalizeStringArray(item.policy_evidence_paths),
               comparison_source_title:
                 typeof item.comparison_source_title === "string"
@@ -1206,13 +1220,23 @@ function normalizeAiRevisionGuidance(input: unknown): AiRevisionGuidance {
                         ? (actionEntry as Record<string, unknown>)
                         : {};
                     return {
+                      priority: typeof action.priority === "string" ? action.priority : "중",
                       target_section_path:
                         typeof action.target_section_path === "string"
                           ? action.target_section_path
                           : "미지정",
+                      current_issue:
+                        typeof action.current_issue === "string" ? action.current_issue : "",
                       action: typeof action.action === "string" ? action.action : "수정",
+                      required_change:
+                        typeof action.required_change === "string" ? action.required_change : "",
                       instruction:
                         typeof action.instruction === "string" ? action.instruction : "",
+                      draft_revision_text:
+                        typeof action.draft_revision_text === "string"
+                          ? action.draft_revision_text
+                          : "",
+                      rationale: typeof action.rationale === "string" ? action.rationale : "",
                     };
                   })
                 : [],

@@ -54,6 +54,7 @@ export interface ReviewExecutionHistoryEntry {
   targetTitles: string[];
   referenceTitles: string[];
   comparisonRunIds: string[];
+  resultStatus: "pending" | "ai_completed" | "comparison_completed";
 }
 
 export interface LawSectionRecord {
@@ -240,13 +241,17 @@ export interface AiGroupReport {
 export interface AiComparisonGap {
   topic: string;
   gap_type: string;
+  priority: string;
   right_requirement: string;
   left_current_state: string;
   risk: string;
   target_document_id: string;
   target_document_title: string;
   target_section_path: string;
+  target_section_reason: string;
   recommended_revision: string;
+  revision_instruction: string;
+  revision_example: string;
   policy_evidence_paths: string[];
   comparison_source_title: string;
   comparison_evidence_paths: string[];
@@ -261,9 +266,14 @@ export interface AiComparisonCoveredItem {
 }
 
 export interface AiComparisonDocumentActionItem {
+  priority: string;
   target_section_path: string;
+  current_issue: string;
   action: string;
+  required_change: string;
   instruction: string;
+  draft_revision_text: string;
+  rationale: string;
 }
 
 export interface AiComparisonDocumentAction {

@@ -31,7 +31,7 @@ import {
   reparseDocument,
   runComparison,
   saveReviewExecutionHistoryEntry,
-  updateReviewExecutionHistoryComparisonRuns,
+  updateReviewExecutionHistoryStatus,
   saveWorkspaceFavorite,
   uploadDocument,
 } from "./lib/documentService";
@@ -59,7 +59,6 @@ type NoticeTone = "info" | "success" | "warning" | "danger";
 type PersistedWorkspaceSelection = WorkspaceSelectionSnapshot;
 type LawDashboardCategory = "법률" | "시행령" | "시행규칙" | "기준";
 const DEFAULT_OPENAI_MODEL = "gpt-5.2";
-const AI_REPORT_ONLY_HISTORY_RUN_ID = "__ai_report_only__";
 
 type AppNotice = {
   tone: NoticeTone;
@@ -195,12 +194,12 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
     });
   }
 
-  function getDeterministicComparisonRunIds(entry: ReviewExecutionHistoryEntry) {
-    return entry.comparisonRunIds.filter((value) => value !== AI_REPORT_ONLY_HISTORY_RUN_ID);
+  function hasDeterministicComparisonResult(entry: ReviewExecutionHistoryEntry) {
+    return entry.resultStatus === "comparison_completed" && entry.comparisonRunIds.length > 0;
   }
 
   function hasAiOnlyHistoryResult(entry: ReviewExecutionHistoryEntry) {
-    return entry.comparisonRunIds.includes(AI_REPORT_ONLY_HISTORY_RUN_ID);
+    return entry.resultStatus === "ai_completed";
   }
 
   async function handleHeaderSignOut() {
@@ -634,9 +633,9 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
 
     let cancelled = false;
 
-    updateReviewExecutionHistoryComparisonRuns({
+    updateReviewExecutionHistoryStatus({
       entryId: pendingAiOnlyReviewHistoryId,
-      comparisonRunIds: [AI_REPORT_ONLY_HISTORY_RUN_ID],
+      resultStatus: "ai_completed",
     })
       .then((updatedEntry) => {
         if (cancelled) {
@@ -656,7 +655,7 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
         setReviewExecutionHistory((current) =>
           current.map((entry) =>
             entry.id === pendingAiOnlyReviewHistoryId
-              ? { ...entry, comparisonRunIds: [AI_REPORT_ONLY_HISTORY_RUN_ID] }
+              ? { ...entry, resultStatus: "ai_completed" }
               : entry,
           ),
         );
@@ -1095,6 +1094,7 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
           targetTitles: reviewHistoryBase.targetTitles,
           referenceTitles: reviewHistoryBase.referenceTitles,
           comparisonRunIds: [],
+          resultStatus: "pending",
         });
         setPendingAiOnlyReviewHistoryId(savedHistoryEntry.id);
         setReviewExecutionHistory((current) => [savedHistoryEntry, ...current].slice(0, 50));
@@ -1158,6 +1158,7 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
           targetTitles: reviewHistoryBase.targetTitles,
           referenceTitles: reviewHistoryBase.referenceTitles,
           comparisonRunIds,
+          resultStatus: "comparison_completed",
         });
         setPendingAiOnlyReviewHistoryId(null);
         setReviewExecutionHistory((current) => [savedHistoryEntry, ...current].slice(0, 50));
@@ -1792,17 +1793,15 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
                         <div className="stack">
                           {dashboardRecentRuns.length ? (
                             dashboardRecentRuns.map((run) => (
-                              (() => {
-                                const deterministicRunIds = getDeterministicComparisonRunIds(run);
-                                const hasAiOnlyResult = hasAiOnlyHistoryResult(run);
-                                return (
                               <button
                                 key={run.id}
                                 type="button"
                                 className="workspace-dashboard-history-item"
                                 onClick={() => {
-                                  setSelectedComparisonRunId(deterministicRunIds[0] ?? null);
-                                  setActiveWorkspaceSection(deterministicRunIds.length || hasAiOnlyResult ? "results" : "history");
+                                  setSelectedComparisonRunId(run.comparisonRunIds[0] ?? null);
+                                  setActiveWorkspaceSection(
+                                    hasDeterministicComparisonResult(run) ? "results" : "history",
+                                  );
                                 }}
                               >
                                 <div className="workspace-dashboard-history-top">
@@ -1813,16 +1812,14 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
                                 <div className="workspace-dashboard-history-meta">
                                   <span>{run.reviewerEmail}</span>
                                   <span>
-                                    {deterministicRunIds.length
-                                      ? `결과 ${deterministicRunIds.length}건`
-                                      : hasAiOnlyResult
+                                    {hasDeterministicComparisonResult(run)
+                                      ? `결과 ${run.comparisonRunIds.length}건`
+                                      : hasAiOnlyHistoryResult(run)
                                         ? "AI 리포트 완료"
                                         : "AI 비교 진행 중"}
                                   </span>
                                 </div>
                               </button>
-                                );
-                              })()
                             ))
                           ) : (
                             <div className="workspace-dashboard-empty">
@@ -1987,12 +1984,12 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
                                 <td>{formatSavedHistoryTimestamp(entry.createdAt)}</td>
                                 <td>{entry.reviewerEmail}</td>
                                 <td>
-                                  {getDeterministicComparisonRunIds(entry).length ? (
+                                  {hasDeterministicComparisonResult(entry) ? (
                                     <button
                                       type="button"
                                       className="button ghost"
                                       onClick={() => {
-                                        setSelectedComparisonRunId(getDeterministicComparisonRunIds(entry)[0] ?? null);
+                                        setSelectedComparisonRunId(entry.comparisonRunIds[0] ?? null);
                                         setActiveWorkspaceSection("results");
                                       }}
                                     >
@@ -2309,6 +2306,7 @@ function createReviewExecutionHistoryEntry(input: {
     targetTitles: input.targetTitles,
     referenceTitles: input.referenceTitles,
     comparisonRunIds: [],
+    resultStatus: "pending",
   };
 }
 
