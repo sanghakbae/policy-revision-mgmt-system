@@ -2288,6 +2288,23 @@ textarea {
   background: rgba(255, 255, 255, 0.96);
 }
 
+.comparison-prompt-editor input {
+  width: 100%;
+  border: 1px solid rgba(24, 53, 44, 0.12);
+  border-radius: 3px;
+  padding: 6px 8px;
+  font: inherit;
+  line-height: 1.4;
+  background: rgba(255, 255, 255, 0.96);
+  box-sizing: border-box;
+}
+
+.comparison-prompt-editor .button {
+  padding: 4px 8px;
+  font-size: 11px;
+  line-height: 1.15;
+}
+
 .comparison-overview-card {
   display: flex;
   flex-direction: column;
@@ -2503,6 +2520,10 @@ textarea {
 .comparison-result-columns > * {
   width: 100%;
   min-width: 0;
+}
+
+.comparison-openai-settings-block {
+  grid-column: 1 / -1;
 }
 
 .comparison-stage-frame-header {

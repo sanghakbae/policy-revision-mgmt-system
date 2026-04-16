@@ -16,9 +16,9 @@ interface AnalyzeSelectedRevisionsRequest {
   openAiApiKey?: string;
   openAiModel?: string;
   promptOverrides?: {
-    left?: string;
-    right?: string;
-    final?: string;
+    left?: string | string[];
+    right?: string | string[];
+    final?: string | string[];
   };
 }
 
@@ -852,10 +852,21 @@ function extractBearerToken(value: string | null) {
   return match?.[1]?.trim() ?? null;
 }
 
-function resolveInstructions(defaultInstructions: string, override?: string) {
-  return typeof override === "string" && override.trim().length > 0
-    ? override.trim()
-    : defaultInstructions;
+function resolveInstructions(defaultInstructions: string, override?: string | string[]) {
+  if (Array.isArray(override)) {
+    const combined = override
+      .filter((item): item is string => typeof item === "string")
+      .map((item) => item.trim())
+      .filter(Boolean)
+      .join("\n\n");
+    return combined || defaultInstructions;
+  }
+
+  if (typeof override === "string" && override.trim().length > 0) {
+    return override.trim();
+  }
+
+  return defaultInstructions;
 }
 
 function extractStructuredPayload(payload: OpenAIResponsesApiResponse) {

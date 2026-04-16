@@ -8,6 +8,7 @@ import type {
   AiRevisionGuidance,
   AiRevisionStageResult,
   AiRevisionPromptOverrides,
+  PromptSlotList,
   AggregatedComparisonResultRecord,
   AiRevisionAnalysisStage,
   ComparisonReviewAggregate,
@@ -1052,7 +1053,7 @@ export async function analyzeSelectedRevisionsStage(input: {
   lawVersionIds: string[];
   leftGroupReport?: unknown;
   rightGroupReport?: unknown;
-  promptOverrides?: Partial<AiRevisionPromptOverrides>;
+  promptOverrides?: Partial<Record<keyof AiRevisionPromptOverrides, string | PromptSlotList>>;
   openAiSettings?: Partial<OpenAiSettings>;
 }): Promise<AiRevisionStageResult> {
   const session = await ensureAuthenticatedSession();

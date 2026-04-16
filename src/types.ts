@@ -285,10 +285,13 @@ export interface AiComparisonReport {
 
 export type AiRevisionAnalysisStage = "left" | "right" | "final";
 
+export type PromptSlotList = [string, string, string];
+export type PromptSlotIndex = 0 | 1 | 2;
+
 export interface AiRevisionPromptOverrides {
-  left: string;
-  right: string;
-  final: string;
+  left: PromptSlotList;
+  right: PromptSlotList;
+  final: PromptSlotList;
 }
 
 export interface AiRevisionGuidance {

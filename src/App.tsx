@@ -46,6 +46,8 @@ import type {
   DocumentSummary,
   LawVersionSummary,
   OpenAiSettings,
+  PromptSlotIndex,
+  PromptSlotList,
   ReviewExecutionHistoryEntry,
   WorkspaceFavorite,
   WorkspaceSelectionSnapshot,
@@ -54,6 +56,7 @@ import type { Session } from "@supabase/supabase-js";
 
 type NoticeTone = "info" | "success" | "warning" | "danger";
 type PersistedWorkspaceSelection = WorkspaceSelectionSnapshot;
+type LawDashboardCategory = "법률" | "시행령" | "시행규칙" | "기준";
 const DEFAULT_OPENAI_MODEL = "gpt-5.2";
 
 type AppNotice = {
@@ -161,9 +164,16 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
     emptyComparisonAnalysisState,
   );
   const [promptOverrides, setPromptOverrides] = useState<AiRevisionPromptOverrides>({
-    left: LEFT_REPORT_INSTRUCTIONS,
-    right: RIGHT_REPORT_INSTRUCTIONS,
-    final: COMPARISON_REPORT_INSTRUCTIONS,
+    left: [LEFT_REPORT_INSTRUCTIONS, "", ""],
+    right: [RIGHT_REPORT_INSTRUCTIONS, "", ""],
+    final: [COMPARISON_REPORT_INSTRUCTIONS, "", ""],
+  });
+  const [activePromptSlotByStage, setActivePromptSlotByStage] = useState<
+    Record<keyof AiRevisionPromptOverrides, PromptSlotIndex>
+  >({
+    left: 0,
+    right: 0,
+    final: 0,
   });
   const isSupabaseConfigured = hasSupabaseEnv();
   const sessionUserId = session?.user.id ?? null;
@@ -497,7 +507,7 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
           targetDocumentIds: comparisonTargetDocumentIds,
           referenceDocumentIds: comparisonReferenceDocumentIds,
           lawVersionIds: selectedLawVersionIds,
-          promptOverrides,
+          promptOverrides: selectActivePromptOverrides(promptOverrides, activePromptSlotByStage),
           openAiSettings,
         }),
       );
@@ -523,7 +533,7 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
           targetDocumentIds: comparisonTargetDocumentIds,
           referenceDocumentIds: comparisonReferenceDocumentIds,
           lawVersionIds: selectedLawVersionIds,
-          promptOverrides,
+          promptOverrides: selectActivePromptOverrides(promptOverrides, activePromptSlotByStage),
           openAiSettings,
         }),
       );
@@ -551,7 +561,7 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
           lawVersionIds: selectedLawVersionIds,
           leftGroupReport: leftStage.left_group_report,
           rightGroupReport: rightStage.right_group_report,
-          promptOverrides,
+          promptOverrides: selectActivePromptOverrides(promptOverrides, activePromptSlotByStage),
           openAiSettings,
         }),
       );
@@ -597,6 +607,7 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
     };
   }, [
     analysisRequestKey,
+    activePromptSlotByStage,
     comparisonReferenceDocumentIds,
     comparisonTargetDocumentIds,
     openAiSettings,
@@ -1421,7 +1432,26 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
     title: "대기 중",
     detail: "현재 실행 중인 작업이 없습니다.",
   };
-  const dashboardDocumentCategoryCounts = documents.reduce(
+  const dashboardLawDocuments = documents.filter((item) => isLawLikeDocument(item));
+  const dashboardRegisteredLaws = getLatestRegisteredLaws(lawVersions);
+  const dashboardLawFallbackItems = dashboardLawDocuments.map((item) => ({
+    id: item.id,
+    title: item.title,
+    category: getLawCategoryFromText(item.title),
+    section_count: item.section_count,
+    version_label: `버전 ${item.version_number}`,
+  }));
+  const dashboardLawDisplayItems = dashboardRegisteredLaws.length
+    ? dashboardRegisteredLaws.map((item) => ({
+        id: item.id,
+        title: item.source_title ?? "제목 없음",
+        category: getLawDashboardCategory(item),
+        section_count: item.section_count,
+        version_label: item.version_label ?? "버전 미기재",
+      }))
+    : dashboardLawFallbackItems;
+  const dashboardPolicyDocuments = documents.filter((item) => !isLawLikeDocument(item));
+  const dashboardDocumentCategoryCounts = dashboardPolicyDocuments.reduce(
     (counts, item) => {
       const category = getDashboardDocumentCategory(item);
 
@@ -1436,10 +1466,9 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
       지침: 0,
     } as Record<"정책" | "지침", number>,
   );
-  const dashboardRegisteredLaws = getLatestRegisteredLaws(lawVersions);
-  const dashboardLawCategoryCounts = dashboardRegisteredLaws.reduce(
+  const dashboardLawCategoryCounts = dashboardLawDisplayItems.reduce(
     (counts, item) => {
-      const category = getLawDashboardCategory(item);
+      const category = item.category;
 
       if (category) {
         counts[category] += 1;
@@ -1452,13 +1481,13 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
       시행령: 0,
       시행규칙: 0,
       기준: 0,
-    } as Record<"법률" | "시행령" | "시행규칙" | "기준", number>,
+    } as Record<LawDashboardCategory, number>,
   );
-  const dashboardLawSectionCount = dashboardRegisteredLaws.reduce((sum, item) => sum + item.section_count, 0);
-  const dashboardRecentDocuments = documents.slice(0, 3);
-  const dashboardRecentLaws = dashboardRegisteredLaws.slice(0, 3);
+  const dashboardLawSectionCount = dashboardLawDisplayItems.reduce((sum, item) => sum + item.section_count, 0);
+  const dashboardRecentDocuments = dashboardPolicyDocuments.slice(0, 3);
+  const dashboardRecentLaws = dashboardLawDisplayItems.slice(0, 3);
   const dashboardRecentRuns = reviewExecutionHistory.slice(0, 3);
-  const dashboardDocumentSectionCount = documents.reduce((sum, item) => sum + item.section_count, 0);
+  const dashboardDocumentSectionCount = dashboardPolicyDocuments.reduce((sum, item) => sum + item.section_count, 0);
 
   return (
     <div className={`app-shell ${showWorkspaceNavigation ? "" : "login-shell"}`.trim()}>
@@ -1595,8 +1624,8 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
                       <section className="panel workspace-dashboard-panel workspace-dashboard-panel-law">
                         <div className="section-header workspace-dashboard-panel-header">
                           <span className="workspace-dashboard-panel-badge">법령</span>
-                          <h2>법령 등록 현황</h2>
-                          <p>현재 등록된 법령 유형별 현황을 확인합니다.</p>
+                          <h2>법령 최신 등록 현황</h2>
+                          <p>법령 소스별 최신 등록 버전을 기준으로 유형별 현황을 확인합니다.</p>
                         </div>
                         <div className="workspace-dashboard-stat-row">
                           <div className="workspace-dashboard-stat-card">
@@ -1617,7 +1646,7 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
                           </div>
                           <div className="workspace-dashboard-stat-card">
                             <span>전체 법령</span>
-                            <strong>{dashboardRegisteredLaws.length}</strong>
+                            <strong>{dashboardLawDisplayItems.length}</strong>
                           </div>
                           <div className="workspace-dashboard-stat-card workspace-dashboard-stat-card-section-total">
                             <span>전체 섹션</span>
@@ -1630,10 +1659,10 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
                               <div key={law.id} className="workspace-dashboard-record">
                                 <div>
                                   <span className="muted-label">법령명</span>
-                                  <strong>{law.source_title ?? "제목 없음"}</strong>
+                                  <strong>{law.title}</strong>
                                 </div>
                                 <div className="workspace-dashboard-record-meta">
-                                  <span>{law.version_label ?? "버전 미기재"}</span>
+                                  <span>{law.version_label}</span>
                                   <span>섹션 {law.section_count}개</span>
                                 </div>
                               </div>
@@ -1946,6 +1975,13 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
                 {activeWorkspaceSection === "settings" ? (
                   <section className="workspace-body-plain workspace-results-body">
                     <PromptSettingsPanel
+                      activePromptSlotByStage={activePromptSlotByStage}
+                      onPromptSlotChange={(stage, index) => {
+                        setActivePromptSlotByStage((current) => ({
+                          ...current,
+                          [stage]: index,
+                        }));
+                      }}
                       openAiSettings={openAiSettings}
                       onOpenAiSettingChange={(field, value) => {
                         setOpenAiSettings((current) => ({
@@ -1954,21 +1990,16 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
                         }));
                       }}
                       promptOverrides={promptOverrides}
-                      onPromptChange={(stage, value) => {
+                      onPromptChange={(stage, index, value) => {
                         setPromptOverrides((current) => ({
                           ...current,
-                          [stage]: value,
+                          [stage]: updatePromptSlot(current[stage], index, value),
                         }));
                       }}
-                      onPromptReset={(stage) => {
+                      onPromptReset={(stage, index) => {
                         setPromptOverrides((current) => ({
                           ...current,
-                          [stage]:
-                            stage === "left"
-                              ? LEFT_REPORT_INSTRUCTIONS
-                              : stage === "right"
-                                ? RIGHT_REPORT_INSTRUCTIONS
-                                : COMPARISON_REPORT_INSTRUCTIONS,
+                          [stage]: resetPromptSlots(stage, index),
                         }));
                       }}
                     />
@@ -2072,6 +2103,43 @@ function writeOpenAiSettings(userId: string, settings: OpenAiSettings) {
       model: settings.model.trim() || DEFAULT_OPENAI_MODEL,
     }),
   );
+}
+
+function updatePromptSlot(slots: PromptSlotList, index: number, value: string): PromptSlotList {
+  const next = [...slots] as PromptSlotList;
+  next[index] = value;
+  return next;
+}
+
+function selectActivePromptOverrides(
+  prompts: AiRevisionPromptOverrides,
+  activeSlots: Record<keyof AiRevisionPromptOverrides, PromptSlotIndex>,
+) {
+  return {
+    left: prompts.left[activeSlots.left],
+    right: prompts.right[activeSlots.right],
+    final: prompts.final[activeSlots.final],
+  };
+}
+
+function resetPromptSlots(
+  stage: keyof AiRevisionPromptOverrides,
+  index?: number,
+): PromptSlotList {
+  const defaultPrompt =
+    stage === "left"
+      ? LEFT_REPORT_INSTRUCTIONS
+      : stage === "right"
+        ? RIGHT_REPORT_INSTRUCTIONS
+        : COMPARISON_REPORT_INSTRUCTIONS;
+
+  if (typeof index !== "number") {
+    return [defaultPrompt, "", ""];
+  }
+
+  const next: PromptSlotList = ["", "", ""];
+  next[index] = index === 0 ? defaultPrompt : "";
+  return next;
 }
 
 function readWorkspaceSelection(userId: string): PersistedWorkspaceSelection | null {
@@ -2237,7 +2305,11 @@ function getDashboardDocumentCategory(document: Pick<DocumentSummary, "document_
   return null;
 }
 
-function getLawCategoryFromText(value: string | null) {
+function isLawLikeDocument(document: Pick<DocumentSummary, "title">) {
+  return Boolean(getLawCategoryFromText(document.title));
+}
+
+function getLawCategoryFromText(value: string | null): LawDashboardCategory | null {
   if (typeof value !== "string" || !value.trim()) {
     return null;
   }
