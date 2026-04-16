@@ -354,7 +354,7 @@ async function analyzeLeftGroup(input: {
 }) {
   const payload = {
     group_name: "left",
-    task: "왼쪽 그룹 정책·지침 정리",
+    task: "비교 대상 정책·지침 정리",
     target_documents: input.targetDocuments,
   };
 
@@ -415,7 +415,7 @@ async function analyzeRightGroup(input: {
 }) {
   const payload = {
     group_name: "right",
-    task: "오른쪽 그룹 기준 정리",
+    task: "기준 문서 및 법령 정리",
     reference_documents: input.referenceDocuments,
     reference_laws: input.laws,
   };

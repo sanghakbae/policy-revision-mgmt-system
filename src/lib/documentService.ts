@@ -393,6 +393,36 @@ export async function saveReviewExecutionHistoryEntry(input: {
   } satisfies ReviewExecutionHistoryEntry;
 }
 
+export async function updateReviewExecutionHistoryComparisonRuns(input: {
+  entryId: string;
+  comparisonRunIds: string[];
+}) {
+  await ensureAuthenticatedSession();
+  const supabase = getSupabaseClient();
+  const { data, error } = await supabase
+    .from("policy_review_execution_history")
+    .update({
+      comparison_run_ids: input.comparisonRunIds,
+    })
+    .eq("id", input.entryId)
+    .select("id, reviewer_email, target_titles, reference_titles, comparison_run_ids, created_at")
+    .single();
+
+  if (error || !data) {
+    throwAuthAwareError(error?.message ?? "review execution history update failed");
+  }
+
+  const row = data as ReviewExecutionHistoryRow;
+  return {
+    id: row.id,
+    createdAt: row.created_at,
+    reviewerEmail: row.reviewer_email,
+    targetTitles: row.target_titles ?? [],
+    referenceTitles: row.reference_titles ?? [],
+    comparisonRunIds: row.comparison_run_ids ?? [],
+  } satisfies ReviewExecutionHistoryEntry;
+}
+
 export async function saveWorkspaceFavorite(input: {
   favoriteId?: string;
   name: string;

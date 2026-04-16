@@ -743,9 +743,9 @@ function SavedAnalysisHistorySection(input: {
                     </td>
                     <td>{entry.selectionSummary}</td>
                     <td>
-                      좌측 {entry.selectionCounts.leftDocumentCount}건
+                      비교 대상 {entry.selectionCounts.leftDocumentCount}건
                       <br />
-                      우측 문서 {entry.selectionCounts.rightDocumentCount}건
+                      기준 문서 {entry.selectionCounts.rightDocumentCount}건
                       <br />
                       법령 {entry.selectionCounts.rightLawCount}건
                     </td>
@@ -917,7 +917,7 @@ function ComparisonReportSection(input: {
           comparisonEvidence: item.comparison_evidence_paths,
           action: item.recommended_revision,
           confidence: item.confidence,
-          reason: `${item.gap_type} | 우측 기준: ${item.right_requirement}\n현재 상태: ${item.left_current_state}\n위험: ${item.risk}`,
+          reason: `${item.gap_type} | 기준 요구사항: ${item.right_requirement}\n현재 상태: ${item.left_current_state}\n위험: ${item.risk}`,
         }))}
       />
       <ReportTableSection
@@ -1019,7 +1019,7 @@ function createSavedHistoryEntry(input: {
   return {
     id: crypto.randomUUID(),
     createdAt: new Date().toISOString(),
-    title: `좌측 ${input.selectionCounts.leftDocumentCount}건 · 우측 ${input.selectionCounts.rightDocumentCount}건 · 법령 ${input.selectionCounts.rightLawCount}건`,
+    title: `비교 대상 ${input.selectionCounts.leftDocumentCount}건 · 기준 문서 ${input.selectionCounts.rightDocumentCount}건 · 법령 ${input.selectionCounts.rightLawCount}건`,
     selectionSummary: input.selectionSummary,
     selectionCounts: input.selectionCounts,
     guidance: input.guidance,
@@ -1121,7 +1121,7 @@ export function getStageProgress(input: {
 
   if (input.isAnalyzingSelection) {
     return {
-      label: "왼쪽 정리 진행 중",
+      label: "비교 대상 정리 진행 중",
       detail: input.analysisStageLabel ?? "단계 리포트를 생성하고 있습니다.",
       percent: 0,
       steps,
@@ -1241,24 +1241,32 @@ function joinListForCell(items: string[]) {
 
 function buildDocumentRows(items: GroupDocumentItem[]) {
   return items.flatMap((item) => {
-    const rowCount = Math.max(item.evidencePairs.length, 1);
-    return Array.from({ length: rowCount }, (_, index) => [
+    const rows = item.evidencePairs.length > 0
+      ? item.evidencePairs
+      : [{ keyPoint: "", sourcePath: "" }];
+    return rows
+      .filter((pair, index) => index === 0 || pair.keyPoint.trim() || pair.sourcePath.trim())
+      .map((pair, index) => [
       index === 0 ? item.title : "",
-      item.evidencePairs[index]?.keyPoint ?? "-",
-      item.evidencePairs[index]?.sourcePath ?? "-",
+      pair.keyPoint.trim(),
+      pair.sourcePath.trim(),
     ]);
   });
 }
 
 function buildRequirementRows(items: GroupRequirementItem[]) {
   return items.flatMap((item) => {
-    const rowCount = Math.max(item.evidencePairs.length, 1);
-    return Array.from({ length: rowCount }, (_, index) => [
+    const rows = item.evidencePairs.length > 0
+      ? item.evidencePairs
+      : [{ sourceTitle: "", sourcePath: "" }];
+    return rows
+      .filter((pair, index) => index === 0 || pair.sourceTitle.trim() || pair.sourcePath.trim())
+      .map((pair, index) => [
       index === 0 ? item.topic : "",
       index === 0 ? item.detail : "",
-      item.evidencePairs[index]?.sourceTitle ?? "-",
-      item.evidencePairs[index]?.sourcePath ?? "-",
-      index === 0 ? item.notes || "-" : "",
+      pair.sourceTitle.trim(),
+      pair.sourcePath.trim(),
+      index === 0 ? item.notes || "" : "",
     ]);
   });
 }
@@ -1267,8 +1275,8 @@ function normalizeDocumentEvidencePairs(item: AiGroupReport["documents"][number]
   if (item.evidence_pairs && item.evidence_pairs.length > 0) {
     return item.evidence_pairs
       .map((pair) => ({
-        keyPoint: pair.key_point.trim() || "-",
-        sourcePath: pair.source_path.trim() || "-",
+        keyPoint: pair.key_point.trim(),
+        sourcePath: pair.source_path.trim(),
       }));
   }
 
@@ -1282,8 +1290,8 @@ function normalizeRequirementEvidencePairs(item: AiGroupReport["merged_requireme
   if (item.evidence_pairs && item.evidence_pairs.length > 0) {
     return item.evidence_pairs
       .map((pair) => ({
-        sourceTitle: pair.source_title.trim() || "-",
-        sourcePath: pair.source_path.trim() || "-",
+        sourceTitle: pair.source_title.trim(),
+        sourcePath: pair.source_path.trim(),
       }));
   }
 
@@ -1294,10 +1302,10 @@ function normalizeRequirementEvidencePairs(item: AiGroupReport["merged_requireme
 }
 
 function zipEvidencePairs(left: string[], right: string[]) {
-  const rowCount = Math.max(left.length, right.length, 1);
+  const rowCount = Math.max(left.length, right.length, 0);
   return Array.from({ length: rowCount }, (_, index) => [
-    left[index]?.trim() || "-",
-    right[index]?.trim() || "-",
+    left[index]?.trim() || "",
+    right[index]?.trim() || "",
   ] as const);
 }
 
@@ -1308,12 +1316,14 @@ function buildGuidanceRows(items: GuidanceItem[]) {
       index === 0 ? item.title : "",
       index === 0 ? item.targetPath : "",
       index === 0 ? item.comparisonSourceTitle : "",
-      item.policyEvidence[index] ?? "-",
-      item.comparisonEvidence[index] ?? "-",
+      item.policyEvidence[index] ?? "",
+      item.comparisonEvidence[index] ?? "",
       index === 0 ? item.action : "",
       index === 0 ? `${Math.round(item.confidence * 100)}%` : "",
       index === 0 ? item.reason : "",
-    ]);
+    ]).filter((row, index) =>
+      index === 0 || String(row[3]).trim().length > 0 || String(row[4]).trim().length > 0,
+    );
   });
 }
 

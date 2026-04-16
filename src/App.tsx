@@ -31,6 +31,7 @@ import {
   reparseDocument,
   runComparison,
   saveReviewExecutionHistoryEntry,
+  updateReviewExecutionHistoryComparisonRuns,
   saveWorkspaceFavorite,
   uploadDocument,
 } from "./lib/documentService";
@@ -58,6 +59,7 @@ type NoticeTone = "info" | "success" | "warning" | "danger";
 type PersistedWorkspaceSelection = WorkspaceSelectionSnapshot;
 type LawDashboardCategory = "법률" | "시행령" | "시행규칙" | "기준";
 const DEFAULT_OPENAI_MODEL = "gpt-5.2";
+const AI_REPORT_ONLY_HISTORY_RUN_ID = "__ai_report_only__";
 
 type AppNotice = {
   tone: NoticeTone;
@@ -150,6 +152,7 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
   const [workspaceSelectionHydrated, setWorkspaceSelectionHydrated] = useState(false);
   const [workspaceFavorites, setWorkspaceFavorites] = useState<WorkspaceFavorite[]>([]);
   const [reviewExecutionHistory, setReviewExecutionHistory] = useState<ReviewExecutionHistoryEntry[]>([]);
+  const [pendingAiOnlyReviewHistoryId, setPendingAiOnlyReviewHistoryId] = useState<string | null>(null);
   const [openAiSettings, setOpenAiSettings] = useState<OpenAiSettings>({
     apiKey: "",
     model: DEFAULT_OPENAI_MODEL,
@@ -190,6 +193,14 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
       detail: inferNoticeDetail(message),
       actions: inferNoticeActions(message),
     });
+  }
+
+  function getDeterministicComparisonRunIds(entry: ReviewExecutionHistoryEntry) {
+    return entry.comparisonRunIds.filter((value) => value !== AI_REPORT_ONLY_HISTORY_RUN_ID);
+  }
+
+  function hasAiOnlyHistoryResult(entry: ReviewExecutionHistoryEntry) {
+    return entry.comparisonRunIds.includes(AI_REPORT_ONLY_HISTORY_RUN_ID);
   }
 
   async function handleHeaderSignOut() {
@@ -397,6 +408,7 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
       setLawVersions([]);
       setComparisonRuns([]);
       setReviewExecutionHistory([]);
+      setPendingAiOnlyReviewHistoryId(null);
       setSelectedDocumentId(null);
       setCheckedDocumentIds([]);
       setComparisonTargetDocumentIds([]);
@@ -614,6 +626,47 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
     promptOverrides,
     selectedLawVersionIds,
   ]);
+
+  useEffect(() => {
+    if (!pendingAiOnlyReviewHistoryId || !comparisonAnalysisState.aiGuidance || selectedLawVersionIds.length > 0) {
+      return;
+    }
+
+    let cancelled = false;
+
+    updateReviewExecutionHistoryComparisonRuns({
+      entryId: pendingAiOnlyReviewHistoryId,
+      comparisonRunIds: [AI_REPORT_ONLY_HISTORY_RUN_ID],
+    })
+      .then((updatedEntry) => {
+        if (cancelled) {
+          return;
+        }
+
+        setReviewExecutionHistory((current) =>
+          current.map((entry) => (entry.id === updatedEntry.id ? updatedEntry : entry)),
+        );
+        setPendingAiOnlyReviewHistoryId(null);
+      })
+      .catch(() => {
+        if (cancelled) {
+          return;
+        }
+
+        setReviewExecutionHistory((current) =>
+          current.map((entry) =>
+            entry.id === pendingAiOnlyReviewHistoryId
+              ? { ...entry, comparisonRunIds: [AI_REPORT_ONLY_HISTORY_RUN_ID] }
+              : entry,
+          ),
+        );
+        setPendingAiOnlyReviewHistoryId(null);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [comparisonAnalysisState.aiGuidance, pendingAiOnlyReviewHistoryId, selectedLawVersionIds.length]);
 
   useEffect(() => {
     const hasSelectionContext =
@@ -1043,6 +1096,7 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
           referenceTitles: reviewHistoryBase.referenceTitles,
           comparisonRunIds: [],
         });
+        setPendingAiOnlyReviewHistoryId(savedHistoryEntry.id);
         setReviewExecutionHistory((current) => [savedHistoryEntry, ...current].slice(0, 50));
       } catch (error) {
         setAppNotice({
@@ -1055,7 +1109,7 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
       setAppNotice({
         tone: "info",
         label: "검토 실행 중",
-        title: `좌측 정책·지침 ${selectedDocuments.length}건과 우측 기준 문서 ${selectedReferenceDocuments.length}건의 AI 검토를 진행 중입니다.`,
+        title: `비교 대상 정책·지침 ${selectedDocuments.length}건과 기준 문서 ${selectedReferenceDocuments.length}건의 AI 검토를 진행 중입니다.`,
         detail: "법령 없이 문서 간 갭 분석만 순차 실행합니다.",
         actions: ["하단 진행 박스에서 1단계, 2단계, 3단계 진행 상태를 확인하세요."],
         debug: [`target_count=${selectedDocuments.length}`, `reference_count=${selectedReferenceDocuments.length}`, "law_count=0"],
@@ -1064,12 +1118,13 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
     }
 
     setAnalysisRequestKey((current) => current + 1);
+    setPendingAiOnlyReviewHistoryId(null);
 
     setAppNotice({
       tone: "info",
       label: "비교 실행",
-      title: "좌우 그룹 AI 비교 리포트와 법령 비교를 함께 실행하는 중입니다...",
-      detail: `${selectedDocuments.length}개 정책·지침과 ${selectedLawVersionIds.length}개 법령 조합의 결정론 비교를 진행하면서, 좌우 그룹 OpenAI 리포트도 별도로 생성합니다.`,
+      title: "비교 대상·기준 AI 비교 리포트와 법령 비교를 함께 실행하는 중입니다...",
+      detail: `${selectedDocuments.length}개 정책·지침과 ${selectedLawVersionIds.length}개 법령 조합의 결정론 비교를 진행하면서, 비교 대상·기준 OpenAI 리포트도 별도로 생성합니다.`,
       actions: ["하단 비교 검토 패널에서 3단계 AI 리포트가 먼저 표시되는지 확인하세요."],
       debug: [
         `target_count=${selectedDocuments.length}`,
@@ -1104,6 +1159,7 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
           referenceTitles: reviewHistoryBase.referenceTitles,
           comparisonRunIds,
         });
+        setPendingAiOnlyReviewHistoryId(null);
         setReviewExecutionHistory((current) => [savedHistoryEntry, ...current].slice(0, 50));
       } catch (error) {
         setAppNotice({
@@ -1121,9 +1177,9 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
       setAppNotice({
         tone: "success",
         label: "비교 완료",
-        title: `좌측 정책·지침 ${selectedDocuments.length}건, 우측 기준 문서 ${selectedReferenceDocuments.length}건, 기준 법률 ${selectedLawVersionIds.length}건의 결정론 비교가 완료되었습니다.`,
+        title: `비교 대상 정책·지침 ${selectedDocuments.length}건, 기준 문서 ${selectedReferenceDocuments.length}건, 기준 법률 ${selectedLawVersionIds.length}건의 결정론 비교가 완료되었습니다.`,
         detail: "AI 3단계 리포트와 비교 결과를 함께 검토할 수 있습니다.",
-        actions: ["하단 비교 검토 패널에서 왼쪽 정리, 오른쪽 정리, 최종 비교 리포트를 확인하세요."],
+        actions: ["하단 비교 검토 패널에서 비교 대상 정리, 기준 정리, 최종 비교 리포트를 확인하세요."],
         debug: [
           `comparison_runs=${comparisonItems.length}`,
           `selected_run=${comparisonRunId ?? "none"}`,
@@ -1137,7 +1193,7 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
         tone: "warning",
         label: "결정론 비교 실패",
         title: "법령 기준 결정론 비교 실행 중 오류가 발생했습니다.",
-        detail: `결정론 비교는 실패했지만, 좌우 그룹 OpenAI 리포트는 별도로 생성됩니다. ${message}`,
+        detail: `결정론 비교는 실패했지만, 비교 대상·기준 OpenAI 리포트는 별도로 생성됩니다. ${message}`,
         actions: ["하단 비교 검토 패널에서 3단계 AI 리포트가 생성됐는지 먼저 확인하세요.", "필요하면 구조 섹션과 법령 비교 데이터를 다시 점검하세요."],
         debug: [`comparison error=${message}`, "ai_analysis_requested=true"],
       });
@@ -1153,7 +1209,7 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
       tone: "info",
       label: "선택 변경",
       title: "기준 법률을 비교 그룹에 추가했습니다.",
-      detail: lawVersion?.source_title ?? "선택된 법률을 우측 기준 그룹에 반영했습니다.",
+      detail: lawVersion?.source_title ?? "선택된 법률을 기준 그룹에 반영했습니다.",
       debug: [`law_version_id=${lawVersionId}`],
     });
   }
@@ -1178,7 +1234,7 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
       tone: "info",
       label: "선택 변경",
       title: "기준 법률을 비교 그룹에서 제거했습니다.",
-      detail: lawVersion?.source_title ?? "선택한 법률을 우측 기준 그룹에서 제외했습니다.",
+      detail: lawVersion?.source_title ?? "선택한 법률을 기준 그룹에서 제외했습니다.",
       debug: [`law_version_id=${lawVersionId}`],
     });
   }
@@ -1220,7 +1276,7 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
       tone: "info",
       label: "그룹 이동",
       title: "문서를 기준 문서 그룹으로 이동했습니다.",
-      detail: document ? document.title : "선택한 문서를 우측 기준 그룹에 배치했습니다.",
+      detail: document ? document.title : "선택한 문서를 기준 그룹에 배치했습니다.",
       debug: [`document_id=${documentId}`, "group=reference"],
     });
   }
@@ -1736,13 +1792,17 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
                         <div className="stack">
                           {dashboardRecentRuns.length ? (
                             dashboardRecentRuns.map((run) => (
+                              (() => {
+                                const deterministicRunIds = getDeterministicComparisonRunIds(run);
+                                const hasAiOnlyResult = hasAiOnlyHistoryResult(run);
+                                return (
                               <button
                                 key={run.id}
                                 type="button"
                                 className="workspace-dashboard-history-item"
                                 onClick={() => {
-                                  setSelectedComparisonRunId(run.comparisonRunIds[0] ?? null);
-                                  setActiveWorkspaceSection(run.comparisonRunIds.length ? "results" : "history");
+                                  setSelectedComparisonRunId(deterministicRunIds[0] ?? null);
+                                  setActiveWorkspaceSection(deterministicRunIds.length || hasAiOnlyResult ? "results" : "history");
                                 }}
                               >
                                 <div className="workspace-dashboard-history-top">
@@ -1752,9 +1812,17 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
                                 <p>{joinListForDisplay(run.referenceTitles)}</p>
                                 <div className="workspace-dashboard-history-meta">
                                   <span>{run.reviewerEmail}</span>
-                                  <span>{run.comparisonRunIds.length ? `결과 ${run.comparisonRunIds.length}건` : "AI 비교 진행 중"}</span>
+                                  <span>
+                                    {deterministicRunIds.length
+                                      ? `결과 ${deterministicRunIds.length}건`
+                                      : hasAiOnlyResult
+                                        ? "AI 리포트 완료"
+                                        : "AI 비교 진행 중"}
+                                  </span>
                                 </div>
                               </button>
+                                );
+                              })()
                             ))
                           ) : (
                             <div className="workspace-dashboard-empty">
@@ -1919,17 +1987,19 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
                                 <td>{formatSavedHistoryTimestamp(entry.createdAt)}</td>
                                 <td>{entry.reviewerEmail}</td>
                                 <td>
-                                  {entry.comparisonRunIds.length ? (
+                                  {getDeterministicComparisonRunIds(entry).length ? (
                                     <button
                                       type="button"
                                       className="button ghost"
                                       onClick={() => {
-                                        setSelectedComparisonRunId(entry.comparisonRunIds[0] ?? null);
+                                        setSelectedComparisonRunId(getDeterministicComparisonRunIds(entry)[0] ?? null);
                                         setActiveWorkspaceSection("results");
                                       }}
                                     >
                                       결과 보기
                                     </button>
+                                  ) : hasAiOnlyHistoryResult(entry) ? (
+                                    <span className="helper-text">AI 리포트 완료</span>
                                   ) : (
                                     <span className="helper-text">AI 비교 진행 중</span>
                                   )}
