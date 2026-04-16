@@ -42,6 +42,11 @@ export interface WorkspaceFavorite {
   selection: WorkspaceSelectionSnapshot;
 }
 
+export interface OpenAiSettings {
+  apiKey: string;
+  model: string;
+}
+
 export interface ReviewExecutionHistoryEntry {
   id: string;
   createdAt: string;

@@ -10,6 +10,8 @@ import {
 
 interface ClassifyRevisionRequest {
   comparisonRunId: string;
+  openAiApiKey?: string;
+  openAiModel?: string;
 }
 
 interface OpenAIResponsesApiResponse {
@@ -32,8 +34,6 @@ Deno.serve(async (request) => {
     const supabaseUrl = Deno.env.get("SUPABASE_URL");
     const anonKey = Deno.env.get("SUPABASE_ANON_KEY");
     const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
-    const openAiApiKey = Deno.env.get("OPENAI_API_KEY");
-    const openAiModel = Deno.env.get("OPENAI_REVISION_MODEL") ?? "gpt-5.2";
 
     if (!supabaseUrl || !anonKey || !serviceRoleKey) {
       return json({ error: "Missing Supabase environment." }, 500);
@@ -56,6 +56,9 @@ Deno.serve(async (request) => {
     if (!body.comparisonRunId?.trim()) {
       throw new Error("comparisonRunId is required.");
     }
+    const openAiApiKey = body.openAiApiKey?.trim() || Deno.env.get("OPENAI_API_KEY");
+    const openAiModel =
+      body.openAiModel?.trim() || Deno.env.get("OPENAI_REVISION_MODEL") || "gpt-5.2";
 
     const comparisonData = await fetchComparisonRunWithResults(
       supabase,

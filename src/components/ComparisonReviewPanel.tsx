@@ -10,6 +10,7 @@ import type {
   AiRevisionGuidance,
   ComparisonReviewAggregate,
   ComparisonReviewDetail,
+  OpenAiSettings,
   SavedAnalysisHistoryEntry,
 } from "../types";
 
@@ -24,6 +25,7 @@ interface ComparisonReviewPanelProps {
   setStatus: (value: string) => void;
   onOverviewChange?: (value: ComparisonReviewOverviewSnapshot) => void;
   analysisState: ComparisonReviewAnalysisState;
+  openAiSettings?: Partial<OpenAiSettings>;
 }
 
 const STAGE_REQUEST_TIMEOUT_MS = 190_000;
@@ -72,6 +74,7 @@ export function ComparisonReviewPanel({
   setStatus,
   onOverviewChange,
   analysisState,
+  openAiSettings,
 }: ComparisonReviewPanelProps) {
   const emitStatus = useEffectEvent((message: string) => {
     setStatus(message);
@@ -219,7 +222,7 @@ export function ComparisonReviewPanel({
     setStatus("백엔드 AI 분류기에 개정 권고 생성을 요청하는 중입니다...");
 
     try {
-      await classifyRevision(comparisonRunId);
+      await classifyRevision(comparisonRunId, openAiSettings);
       const updated = await getComparisonReview(comparisonRunId);
       setDetail(updated);
       setStatus("개정 권고를 갱신했습니다.");

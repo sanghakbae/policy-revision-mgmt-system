@@ -13,6 +13,8 @@ interface AnalyzeSelectedRevisionsRequest {
   lawVersionIds: string[];
   leftGroupReport?: GroupReportResponse;
   rightGroupReport?: GroupReportResponse;
+  openAiApiKey?: string;
+  openAiModel?: string;
   promptOverrides?: {
     left?: string;
     right?: string;
@@ -110,15 +112,9 @@ Deno.serve(async (request) => {
     const supabaseUrl = Deno.env.get("SUPABASE_URL");
     const anonKey = Deno.env.get("SUPABASE_ANON_KEY");
     const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
-    const openAiApiKey = Deno.env.get("OPENAI_API_KEY");
-    const openAiModel = Deno.env.get("OPENAI_REVISION_MODEL") ?? "gpt-5.2";
 
     if (!supabaseUrl || !anonKey || !serviceRoleKey) {
       return json({ error: "Missing Supabase environment." }, 500);
-    }
-
-    if (!openAiApiKey) {
-      return json({ error: "OPENAI_API_KEY is not configured." }, 500);
     }
 
     const authClient = createClient(supabaseUrl, anonKey);
@@ -132,6 +128,14 @@ Deno.serve(async (request) => {
     }
 
     const body = (await request.json()) as AnalyzeSelectedRevisionsRequest;
+    const openAiApiKey = body.openAiApiKey?.trim() || Deno.env.get("OPENAI_API_KEY");
+    const openAiModel =
+      body.openAiModel?.trim() || Deno.env.get("OPENAI_REVISION_MODEL") || "gpt-5.2";
+
+    if (!openAiApiKey) {
+      return json({ error: "OPENAI_API_KEY is not configured." }, 500);
+    }
+
     const stage = body.stage ?? "final";
     const promptOverrides = body.promptOverrides ?? {};
     const targetDocumentIds = [...new Set(body.targetDocumentIds ?? [])].filter(Boolean);

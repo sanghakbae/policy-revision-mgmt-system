@@ -18,6 +18,7 @@ import type {
   DocumentSummary,
   LawDetail,
   LawVersionSummary,
+  OpenAiSettings,
   ReviewExecutionHistoryEntry,
   WorkspaceFavorite,
   WorkspaceSelectionSnapshot,
@@ -1008,13 +1009,18 @@ export async function getAggregatedComparisonReview(
   };
 }
 
-export async function classifyRevision(comparisonRunId: string) {
+export async function classifyRevision(
+  comparisonRunId: string,
+  openAiSettings?: Partial<OpenAiSettings>,
+) {
   const session = await ensureAuthenticatedSession();
   const currentUser = await ensureAuthenticatedUser(session.access_token);
   return await invokeEdgeFunction(
     "classify-revision",
     {
       comparisonRunId,
+      openAiApiKey: normalizeOptionalString(openAiSettings?.apiKey),
+      openAiModel: normalizeOptionalString(openAiSettings?.model),
     },
     {
       stage: "classify-revision",
@@ -1047,10 +1053,15 @@ export async function analyzeSelectedRevisionsStage(input: {
   leftGroupReport?: unknown;
   rightGroupReport?: unknown;
   promptOverrides?: Partial<AiRevisionPromptOverrides>;
+  openAiSettings?: Partial<OpenAiSettings>;
 }): Promise<AiRevisionStageResult> {
   const session = await ensureAuthenticatedSession();
   const currentUser = await ensureAuthenticatedUser(session.access_token);
-  const payload = await invokeEdgeFunction("analyze-selected-revisions", input, {
+  const payload = await invokeEdgeFunction("analyze-selected-revisions", {
+    ...input,
+    openAiApiKey: normalizeOptionalString(input.openAiSettings?.apiKey),
+    openAiModel: normalizeOptionalString(input.openAiSettings?.model),
+  }, {
     stage: `analyze-selected-revisions-${input.stage}`,
     session,
     userId: currentUser.id,
@@ -1445,6 +1456,11 @@ function isSessionExpiredOrNearExpiry(session: { expires_at?: number | null }) {
   const currentEpochSeconds = Math.floor(Date.now() / 1000);
   const refreshLeewaySeconds = 90;
   return session.expires_at <= currentEpochSeconds + refreshLeewaySeconds;
+}
+
+function normalizeOptionalString(value: string | undefined) {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
 }
 
 async function encodeFileAsBase64(file: File) {

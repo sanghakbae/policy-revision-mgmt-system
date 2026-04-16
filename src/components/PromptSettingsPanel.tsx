@@ -1,6 +1,8 @@
-import type { AiRevisionPromptOverrides } from "../types";
+import type { AiRevisionPromptOverrides, OpenAiSettings } from "../types";
 
 interface PromptSettingsPanelProps {
+  openAiSettings: OpenAiSettings;
+  onOpenAiSettingChange: (field: keyof OpenAiSettings, value: string) => void;
   promptOverrides: AiRevisionPromptOverrides;
   onPromptChange: (stage: keyof AiRevisionPromptOverrides, value: string) => void;
   onPromptReset: (stage: keyof AiRevisionPromptOverrides) => void;
@@ -9,6 +11,46 @@ interface PromptSettingsPanelProps {
 export function PromptSettingsPanel(input: PromptSettingsPanelProps) {
   return (
     <section className="comparison-result-columns">
+      <section className="review-column comparison-source-column comparison-review-stage-frame comparison-report-block">
+        <div className="section-header comparison-frame-header comparison-stage-frame-header">
+          <div className="comparison-stage-frame-head">
+            <h3>OpenAI 설정</h3>
+            <span className="comparison-report-stage-step">기본값</span>
+          </div>
+          <p>개인 OpenAI API 키와 모델을 저장해 AI 비교와 개정 권고 생성에 사용합니다.</p>
+        </div>
+        <div className="comparison-prompt-editor">
+          <div className="comparison-prompt-editor-head">
+            <strong>API 연결 정보</strong>
+          </div>
+          <label className="stack">
+            <span className="muted-label">OpenAI API Key</span>
+            <input
+              type="password"
+              value={input.openAiSettings.apiKey}
+              onChange={(event) => input.onOpenAiSettingChange("apiKey", event.target.value)}
+              placeholder="sk-..."
+              autoComplete="off"
+              spellCheck={false}
+            />
+          </label>
+          <label className="stack">
+            <span className="muted-label">Model</span>
+            <input
+              type="text"
+              value={input.openAiSettings.model}
+              onChange={(event) => input.onOpenAiSettingChange("model", event.target.value)}
+              placeholder="gpt-5.2"
+              autoComplete="off"
+              spellCheck={false}
+            />
+          </label>
+          <p className="helper-text">
+            키는 현재 브라우저 로컬 저장소에만 저장되며, 비교 요청 시 Edge Function으로 전달됩니다.
+          </p>
+        </div>
+      </section>
+
       {([
         ["left", "1단계", "비교 대상 정리", "비교 대상 문서 정리 프롬프트를 설정합니다."],
         ["right", "2단계", "기준 정리", "기준 문서와 법령 정리 프롬프트를 설정합니다."],

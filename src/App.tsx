@@ -45,6 +45,7 @@ import type {
   ComparisonRunSummary,
   DocumentSummary,
   LawVersionSummary,
+  OpenAiSettings,
   ReviewExecutionHistoryEntry,
   WorkspaceFavorite,
   WorkspaceSelectionSnapshot,
@@ -53,6 +54,7 @@ import type { Session } from "@supabase/supabase-js";
 
 type NoticeTone = "info" | "success" | "warning" | "danger";
 type PersistedWorkspaceSelection = WorkspaceSelectionSnapshot;
+const DEFAULT_OPENAI_MODEL = "gpt-5.2";
 
 type AppNotice = {
   tone: NoticeTone;
@@ -145,6 +147,11 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
   const [workspaceSelectionHydrated, setWorkspaceSelectionHydrated] = useState(false);
   const [workspaceFavorites, setWorkspaceFavorites] = useState<WorkspaceFavorite[]>([]);
   const [reviewExecutionHistory, setReviewExecutionHistory] = useState<ReviewExecutionHistoryEntry[]>([]);
+  const [openAiSettings, setOpenAiSettings] = useState<OpenAiSettings>({
+    apiKey: "",
+    model: DEFAULT_OPENAI_MODEL,
+  });
+  const [openAiSettingsHydrated, setOpenAiSettingsHydrated] = useState(false);
   const [activeWorkspaceSection, setActiveWorkspaceSection] = useState<WorkspaceSection>(
     () => portalWorkspaceSection ?? "dashboard",
   );
@@ -491,6 +498,7 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
           referenceDocumentIds: comparisonReferenceDocumentIds,
           lawVersionIds: selectedLawVersionIds,
           promptOverrides,
+          openAiSettings,
         }),
       );
 
@@ -516,6 +524,7 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
           referenceDocumentIds: comparisonReferenceDocumentIds,
           lawVersionIds: selectedLawVersionIds,
           promptOverrides,
+          openAiSettings,
         }),
       );
 
@@ -543,6 +552,7 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
           leftGroupReport: leftStage.left_group_report,
           rightGroupReport: rightStage.right_group_report,
           promptOverrides,
+          openAiSettings,
         }),
       );
 
@@ -589,6 +599,7 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
     analysisRequestKey,
     comparisonReferenceDocumentIds,
     comparisonTargetDocumentIds,
+    openAiSettings,
     promptOverrides,
     selectedLawVersionIds,
   ]);
@@ -651,6 +662,28 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
     comparisonReferenceDocumentIds,
     selectedLawVersionIds,
   ]);
+
+  useEffect(() => {
+    if (!sessionUserId) {
+      setOpenAiSettings({
+        apiKey: "",
+        model: DEFAULT_OPENAI_MODEL,
+      });
+      setOpenAiSettingsHydrated(false);
+      return;
+    }
+
+    setOpenAiSettings(readOpenAiSettings(sessionUserId));
+    setOpenAiSettingsHydrated(true);
+  }, [sessionUserId]);
+
+  useEffect(() => {
+    if (!sessionUserId || !openAiSettingsHydrated) {
+      return;
+    }
+
+    writeOpenAiSettings(sessionUserId, openAiSettings);
+  }, [sessionUserId, openAiSettings, openAiSettingsHydrated]);
 
   async function handleUpload(file: File, title: string, description: string) {
     setAppNotice({
@@ -1819,6 +1852,7 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
                       selectedDocumentIds={comparisonTargetDocumentIds}
                       referenceDocumentIds={comparisonReferenceDocumentIds}
                       selectedLawVersionIds={selectedLawVersionIds}
+                      openAiSettings={openAiSettings}
                       historyStorageKey={
                         sessionUserId ? `policy-revision-mgmt-ai-analysis-history:${sessionUserId}` : undefined
                       }
@@ -1897,6 +1931,7 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
                       selectedDocumentIds={comparisonTargetDocumentIds}
                       referenceDocumentIds={comparisonReferenceDocumentIds}
                       selectedLawVersionIds={selectedLawVersionIds}
+                      openAiSettings={openAiSettings}
                       historyStorageKey={
                         sessionUserId ? `policy-revision-mgmt-ai-analysis-history:${sessionUserId}` : undefined
                       }
@@ -1911,6 +1946,13 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
                 {activeWorkspaceSection === "settings" ? (
                   <section className="workspace-body-plain workspace-results-body">
                     <PromptSettingsPanel
+                      openAiSettings={openAiSettings}
+                      onOpenAiSettingChange={(field, value) => {
+                        setOpenAiSettings((current) => ({
+                          ...current,
+                          [field]: value,
+                        }));
+                      }}
                       promptOverrides={promptOverrides}
                       onPromptChange={(stage, value) => {
                         setPromptOverrides((current) => ({
@@ -1979,6 +2021,57 @@ function inferNoticeActions(message: string) {
 
 function getWorkspaceSelectionStorageKey(userId: string) {
   return `policy-revision-mgmt-workspace-selection:${userId}`;
+}
+
+function getOpenAiSettingsStorageKey(userId: string) {
+  return `policy-revision-mgmt-openai-settings:${userId}`;
+}
+
+function readOpenAiSettings(userId: string): OpenAiSettings {
+  if (typeof window === "undefined") {
+    return {
+      apiKey: "",
+      model: DEFAULT_OPENAI_MODEL,
+    };
+  }
+
+  const raw = window.localStorage.getItem(getOpenAiSettingsStorageKey(userId));
+  if (!raw) {
+    return {
+      apiKey: "",
+      model: DEFAULT_OPENAI_MODEL,
+    };
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as Partial<OpenAiSettings>;
+    return {
+      apiKey: typeof parsed.apiKey === "string" ? parsed.apiKey : "",
+      model:
+        typeof parsed.model === "string" && parsed.model.trim()
+          ? parsed.model
+          : DEFAULT_OPENAI_MODEL,
+    };
+  } catch {
+    return {
+      apiKey: "",
+      model: DEFAULT_OPENAI_MODEL,
+    };
+  }
+}
+
+function writeOpenAiSettings(userId: string, settings: OpenAiSettings) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  window.localStorage.setItem(
+    getOpenAiSettingsStorageKey(userId),
+    JSON.stringify({
+      apiKey: settings.apiKey,
+      model: settings.model.trim() || DEFAULT_OPENAI_MODEL,
+    }),
+  );
 }
 
 function readWorkspaceSelection(userId: string): PersistedWorkspaceSelection | null {
