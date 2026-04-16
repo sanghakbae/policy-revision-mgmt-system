@@ -727,26 +727,17 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
   ]);
 
   useEffect(() => {
-    if (!sessionUserId) {
-      setOpenAiSettings({
-        apiKey: "",
-        model: DEFAULT_OPENAI_MODEL,
-      });
-      setOpenAiSettingsHydrated(false);
-      return;
-    }
-
     setOpenAiSettings(readOpenAiSettings(sessionUserId));
     setOpenAiSettingsHydrated(true);
   }, [sessionUserId]);
 
   useEffect(() => {
-    if (!sessionUserId || !openAiSettingsHydrated) {
+    if (!openAiSettingsHydrated) {
       return;
     }
 
-    writeOpenAiSettings(sessionUserId, openAiSettings);
-  }, [sessionUserId, openAiSettings, openAiSettingsHydrated]);
+    writeOpenAiSettings(openAiSettings);
+  }, [openAiSettings, openAiSettingsHydrated]);
 
   async function handleUpload(file: File, title: string, description: string) {
     setAppNotice({
@@ -1959,60 +1950,87 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
                 ) : null}
 
                 {activeWorkspaceSection === "history" ? (
-                  <section className="panel panel-wide workspace-body-card">
-                    <div className="section-header workspace-section-header">
-                      <h2>이력 관리</h2>
-                      <p>검토 실행 시점의 비교 대상, 기준, 일시, 검토자를 실행 로그로 확인합니다.</p>
-                    </div>
-                    {reviewExecutionHistory.length ? (
-                      <div className="comparison-table-wrap comparison-history-table-wrap">
-                        <table className="comparison-data-table comparison-history-table">
-                          <thead>
-                            <tr>
-                              <th>비교 대상</th>
-                              <th>기준</th>
-                              <th>일시</th>
-                              <th>검토자</th>
-                              <th>결과</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {reviewExecutionHistory.map((entry) => (
-                              <tr key={entry.id}>
-                                <td>{joinListForDisplay(entry.targetTitles)}</td>
-                                <td>{joinListForDisplay(entry.referenceTitles)}</td>
-                                <td>{formatSavedHistoryTimestamp(entry.createdAt)}</td>
-                                <td>{entry.reviewerEmail}</td>
-                                <td>
-                                  {hasDeterministicComparisonResult(entry) ? (
-                                    <button
-                                      type="button"
-                                      className="button ghost"
-                                      onClick={() => {
-                                        setSelectedComparisonRunId(entry.comparisonRunIds[0] ?? null);
-                                        setActiveWorkspaceSection("results");
-                                      }}
-                                    >
-                                      결과 보기
-                                    </button>
-                                  ) : hasAiOnlyHistoryResult(entry) ? (
-                                    <span className="helper-text">AI 리포트 완료</span>
-                                  ) : (
-                                    <span className="helper-text">AI 비교 진행 중</span>
-                                  )}
-                                </td>
+                  <div className="stack">
+                    <section className="panel panel-wide workspace-body-card">
+                      <div className="section-header workspace-section-header">
+                        <h2>이력 관리</h2>
+                        <p>검토 실행 시점의 비교 대상, 기준, 일시, 검토자를 실행 로그로 확인합니다.</p>
+                      </div>
+                      {reviewExecutionHistory.length ? (
+                        <div className="comparison-table-wrap comparison-history-table-wrap">
+                          <table className="comparison-data-table comparison-history-table">
+                            <thead>
+                              <tr>
+                                <th>비교 대상</th>
+                                <th>기준</th>
+                                <th>일시</th>
+                                <th>검토자</th>
+                                <th>결과</th>
                               </tr>
-                            ))}
-                          </tbody>
-                        </table>
+                            </thead>
+                            <tbody>
+                              {reviewExecutionHistory.map((entry) => (
+                                <tr key={entry.id}>
+                                  <td>{joinListForDisplay(entry.targetTitles)}</td>
+                                  <td>{joinListForDisplay(entry.referenceTitles)}</td>
+                                  <td>{formatSavedHistoryTimestamp(entry.createdAt)}</td>
+                                  <td>{entry.reviewerEmail}</td>
+                                  <td>
+                                    {hasDeterministicComparisonResult(entry) ? (
+                                      <button
+                                        type="button"
+                                        className="button ghost"
+                                        onClick={() => {
+                                          setSelectedComparisonRunId(entry.comparisonRunIds[0] ?? null);
+                                          setActiveWorkspaceSection("results");
+                                        }}
+                                      >
+                                        결과 보기
+                                      </button>
+                                    ) : hasAiOnlyHistoryResult(entry) ? (
+                                      <span className="history-status-badge history-status-badge-complete">
+                                        AI 리포트 완료
+                                      </span>
+                                    ) : (
+                                      <span className="history-status-badge history-status-badge-pending">
+                                        AI 비교 진행 중
+                                      </span>
+                                    )}
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      ) : (
+                        <div className="empty-state">
+                          <strong>검토 실행 이력이 없습니다.</strong>
+                          <p>비교 설정에서 검토 실행을 시작하면 이력이 이곳에 기록됩니다.</p>
+                        </div>
+                      )}
+                    </section>
+                    <section className="panel panel-wide workspace-body-card">
+                      <div className="section-header workspace-section-header">
+                        <h2>AI 리포트 이력</h2>
+                        <p>저장된 AI 비교 리포트를 다시 열거나 삭제합니다.</p>
                       </div>
-                    ) : (
-                      <div className="empty-state">
-                        <strong>검토 실행 이력이 없습니다.</strong>
-                        <p>비교 설정에서 검토 실행을 시작하면 이력이 이곳에 기록됩니다.</p>
-                      </div>
-                    )}
-                  </section>
+                      <ComparisonReviewPanel
+                        comparisonRunId={selectedComparisonRunId}
+                        comparisonRunIds={activeComparisonRunIds}
+                        selectedDocumentIds={comparisonTargetDocumentIds}
+                        referenceDocumentIds={comparisonReferenceDocumentIds}
+                        selectedLawVersionIds={selectedLawVersionIds}
+                        openAiSettings={openAiSettings}
+                        historyStorageKey={
+                          sessionUserId ? `policy-revision-mgmt-ai-analysis-history:${sessionUserId}` : undefined
+                        }
+                        viewMode="history"
+                        setStatus={setStatus}
+                        onOverviewChange={setComparisonOverview}
+                        analysisState={comparisonAnalysisState}
+                      />
+                    </section>
+                  </div>
                 ) : null}
 
                 {activeWorkspaceSection === "aiHistory" ? (
@@ -2121,11 +2139,11 @@ function getWorkspaceSelectionStorageKey(userId: string) {
   return `policy-revision-mgmt-workspace-selection:${userId}`;
 }
 
-function getOpenAiSettingsStorageKey(userId: string) {
-  return `policy-revision-mgmt-openai-settings:${userId}`;
+function getOpenAiSettingsStorageKey() {
+  return "policy-revision-mgmt-openai-settings";
 }
 
-function readOpenAiSettings(userId: string): OpenAiSettings {
+function readOpenAiSettings(userId?: string | null): OpenAiSettings {
   if (typeof window === "undefined") {
     return {
       apiKey: "",
@@ -2133,7 +2151,9 @@ function readOpenAiSettings(userId: string): OpenAiSettings {
     };
   }
 
-  const raw = window.localStorage.getItem(getOpenAiSettingsStorageKey(userId));
+  const raw =
+    window.localStorage.getItem(getOpenAiSettingsStorageKey()) ??
+    (userId ? window.localStorage.getItem(`policy-revision-mgmt-openai-settings:${userId}`) : null);
   if (!raw) {
     return {
       apiKey: "",
@@ -2158,13 +2178,13 @@ function readOpenAiSettings(userId: string): OpenAiSettings {
   }
 }
 
-function writeOpenAiSettings(userId: string, settings: OpenAiSettings) {
+function writeOpenAiSettings(settings: OpenAiSettings) {
   if (typeof window === "undefined") {
     return;
   }
 
   window.localStorage.setItem(
-    getOpenAiSettingsStorageKey(userId),
+    getOpenAiSettingsStorageKey(),
     JSON.stringify({
       apiKey: settings.apiKey,
       model: settings.model.trim() || DEFAULT_OPENAI_MODEL,

@@ -2664,8 +2664,8 @@ textarea {
   padding: 4px 6px;
   border-right: 1px solid rgba(24, 34, 45, 0.08);
   border-bottom: 1px solid rgba(24, 34, 45, 0.08);
-  vertical-align: top;
-  text-align: left;
+  vertical-align: middle;
+  text-align: center;
   font-size: 12px;
   line-height: 1.45;
   white-space: pre-wrap;
@@ -2691,6 +2691,32 @@ textarea {
 .comparison-table-empty {
   text-align: center;
   color: var(--muted);
+}
+
+.history-status-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 132px;
+  min-height: 30px;
+  padding: 5px 12px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1.2;
+  letter-spacing: -0.01em;
+}
+
+.history-status-badge-complete {
+  background: rgba(19, 138, 91, 0.12);
+  color: #0f6a46;
+  border: 1px solid rgba(19, 138, 91, 0.18);
+}
+
+.history-status-badge-pending {
+  background: rgba(227, 145, 17, 0.12);
+  color: #9a5f00;
+  border: 1px solid rgba(227, 145, 17, 0.18);
 }
 
 .comparison-table-empty-primary {

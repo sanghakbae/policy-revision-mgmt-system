@@ -341,19 +341,6 @@ export function ComparisonReviewPanel({
     );
   }
 
-  if (shouldShowHistory && !comparisonRunId && comparisonRunIds.length === 0 && !hasSelectionContext) {
-    return (
-      <div className="empty-state">
-        <strong>{shouldShowHistory ? "이력 관리" : "검토 결과"}</strong>
-        <p>
-          {shouldShowHistory
-            ? "저장된 검토 이력이 없거나 아직 비교 대상이 준비되지 않았습니다."
-            : "아직 비교 대상이 준비되지 않았습니다. 비교 대상과 기준을 먼저 구성하세요."}
-        </p>
-      </div>
-    );
-  }
-
   if (!shouldShowHistory && !comparisonRunId && comparisonRunIds.length === 0 && !hasSelectionContext) {
     return (
       <div className="stack comparison-review-shell">
@@ -940,6 +927,18 @@ function ComparisonReportSection(input: {
         emptyText="이미 충분히 반영된 항목이 없습니다."
       />
       <ReportTableSection
+        title="남은 관찰 포인트"
+        columns={["번호", "내용"]}
+        rows={(report?.remaining_watchpoints ?? []).map((item, index) => [String(index + 1), item])}
+        emptyText="남은 관찰 포인트가 없습니다."
+      />
+      <ReportTableSection
+        title="저신뢰 메모"
+        columns={["번호", "내용"]}
+        rows={(report?.low_confidence_notes ?? []).map((item, index) => [String(index + 1), item])}
+        emptyText="저신뢰 메모가 없습니다."
+      />
+      <ReportTableSection
         title="문서별 조치"
         columns={["문서", "조치"]}
         rows={(report?.document_actions ?? []).flatMap((item) =>
@@ -956,18 +955,6 @@ function ComparisonReportSection(input: {
           ]),
         )}
         emptyText="문서별 조치가 없습니다."
-      />
-      <ReportTableSection
-        title="남은 관찰 포인트"
-        columns={["번호", "내용"]}
-        rows={(report?.remaining_watchpoints ?? []).map((item, index) => [String(index + 1), item])}
-        emptyText="남은 관찰 포인트가 없습니다."
-      />
-      <ReportTableSection
-        title="저신뢰 메모"
-        columns={["번호", "내용"]}
-        rows={(report?.low_confidence_notes ?? []).map((item, index) => [String(index + 1), item])}
-        emptyText="저신뢰 메모가 없습니다."
       />
     </section>
   );
