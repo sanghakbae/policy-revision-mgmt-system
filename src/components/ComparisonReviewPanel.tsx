@@ -844,11 +844,16 @@ function GroupReportSection(input: {
             type="button"
             className="button ghost"
             onClick={() =>
-              downloadCsv(`${input.title}.csv`, ["구분", "항목1", "항목2", "항목3", "항목4", "항목5"], [
-                ...input.keyFindings.map((item, index) => ["핵심 정리", String(index + 1), item, "", "", ""]),
-                ...documentRows.map((row) => ["문서별 정리", row[0], row[1], row[2], "", ""]),
-                ...requirementRows.map((row) => ["통합 요구사항", row[0], row[1], row[2], row[3], row[4]]),
-              ])
+              downloadCsv(
+                `${input.title}.csv`,
+                ["구분", "문서/주제", "핵심 내용", "근거 문서", "근거 경로", "비고"],
+                [
+                  ["요약", input.title, input.summary, "", "", ""],
+                  ...input.keyFindings.map((item) => ["핵심 정리", input.title, item, "", "", ""]),
+                  ...documentRows.map((row) => ["문서별 정리", row[0], row[1], "", row[2], ""]),
+                  ...requirementRows.map((row) => ["통합 요구사항", row[0], row[1], row[2], row[3], row[4]]),
+                ],
+              )
             }
           >
             CSV 내보내기
@@ -921,45 +926,50 @@ function ComparisonReportSection(input: {
             type="button"
             className="button ghost"
             onClick={() =>
-              downloadCsv(`${input.title}.csv`, ["구분", "항목1", "항목2", "항목3", "항목4", "항목5", "항목6", "항목7", "항목8"], [
-                ...(report?.gaps ?? []).map((item) => [
-                  "개정 필요 항목",
-                  item.topic,
-                  item.target_document_title,
-                  item.target_section_path,
-                  item.recommended_revision,
-                  item.revision_example,
-                  item.right_requirement,
-                  item.left_current_state,
-                  item.risk,
-                ]),
-                ...(report?.well_covered_items ?? []).map((item) => [
-                  "이미 충분히 반영된 항목",
-                  item.topic,
-                  item.reason,
-                  joinListForCell(item.policy_evidence_paths),
-                  joinListForCell(item.comparison_evidence_paths),
-                  "",
-                  "",
-                  "",
-                  "",
-                ]),
-                ...(report?.document_actions ?? []).flatMap((item) =>
-                  item.actions.map((action) => [
-                    "문서별 조치",
-                    item.document_title,
-                    action.target_section_path,
-                    action.action,
-                    action.instruction,
-                    action.draft_revision_text,
-                    action.current_issue,
-                    action.required_change,
-                    action.rationale,
+              downloadCsv(
+                `${input.title}.csv`,
+                ["구분", "주제/문서", "수정 위치", "무엇을 수정", "어떻게 수정", "예시 문안", "기준 요구사항", "현재 상태/문제", "위험/근거"],
+                [
+                  ["요약", input.title, "", report?.summary ?? "", report?.overall_comment ?? "", "", "", "", ""],
+                  ...(report?.gaps ?? []).map((item) => [
+                    "개정 필요 항목",
+                    `${item.topic} / ${item.target_document_title}`,
+                    item.target_section_path,
+                    item.recommended_revision,
+                    item.revision_instruction,
+                    item.revision_example,
+                    item.right_requirement,
+                    item.left_current_state,
+                    item.risk,
                   ]),
-                ),
-                ...(report?.remaining_watchpoints ?? []).map((item, index) => ["남은 관찰 포인트", String(index + 1), item, "", "", "", "", "", ""]),
-                ...(report?.low_confidence_notes ?? []).map((item, index) => ["저신뢰 메모", String(index + 1), item, "", "", "", "", "", ""]),
-              ])
+                  ...(report?.document_actions ?? []).flatMap((item) =>
+                    item.actions.map((action) => [
+                      "문서별 조치",
+                      item.document_title,
+                      action.target_section_path,
+                      action.required_change,
+                      action.instruction,
+                      action.draft_revision_text,
+                      action.action,
+                      action.current_issue,
+                      action.rationale,
+                    ]),
+                  ),
+                  ...(report?.well_covered_items ?? []).map((item) => [
+                    "이미 충분히 반영된 항목",
+                    item.topic,
+                    "",
+                    item.reason,
+                    "",
+                    "",
+                    joinListForCell(item.comparison_evidence_paths),
+                    joinListForCell(item.policy_evidence_paths),
+                    "",
+                  ]),
+                  ...(report?.remaining_watchpoints ?? []).map((item) => ["남은 관찰 포인트", item, "", "", "", "", "", "", ""]),
+                  ...(report?.low_confidence_notes ?? []).map((item) => ["저신뢰 메모", item, "", "", "", "", "", "", ""]),
+                ],
+              )
             }
           >
             CSV 내보내기
