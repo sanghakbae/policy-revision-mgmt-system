@@ -3,6 +3,7 @@ import type {
   OpenAiSettings,
   PromptSlotIndex,
 } from "../types";
+import { COMPARISON_REPORT_EXAMPLE } from "../../shared/analysisPrompts";
 
 interface PromptSettingsPanelProps {
   openAiSettings: OpenAiSettings;
@@ -78,6 +79,15 @@ export function PromptSettingsPanel(input: PromptSettingsPanelProps) {
                 placeholder={activeIndex === 0 ? "기본 프롬프트를 작성하세요." : "추가 규칙이나 보완 지시를 입력하세요."}
               />
             </div>
+            {stage === "final" ? (
+              <div className="comparison-prompt-example">
+                <div className="comparison-prompt-example-head">
+                  <strong>최종 비교 리포트 결과 예시</strong>
+                  <span className="muted-label">신설/수정/삭제 + 장·조·항·호·목 위치 포함</span>
+                </div>
+                <pre>{COMPARISON_REPORT_EXAMPLE}</pre>
+              </div>
+            ) : null}
           </div>
         </section>
         );

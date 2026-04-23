@@ -43,3 +43,84 @@ export const COMPARISON_REPORT_INSTRUCTIONS = [
   "well_covered_items에는 이미 충분히 커버된 항목만 넣어라.",
   "반드시 JSON만 반환하라.",
 ].join(" ");
+
+export const COMPARISON_REPORT_EXAMPLE = JSON.stringify(
+  {
+    summary:
+      "기준 문서와 법령을 비교한 결과, 비교 대상 문서에는 처리방침 공개, 처리위탁 관리, 사고 대응 절차에서 개정이 필요합니다.",
+    revision_needed: true,
+    overall_comment:
+      "비교 대상 문서는 기본 통제는 존재하지만, 기준 대비 공개 절차, 점검 주기, 삭제 기준이 부족합니다. 모든 권고는 비교 대상 문서 기준 장·조·항·호·목 위치로 특정해야 합니다.",
+    gaps: [
+      {
+        topic: "처리방침 공개 방법",
+        gap_type: "신설",
+        priority: "상",
+        right_requirement:
+          "처리방침은 정보주체가 쉽게 확인할 수 있는 위치에 공개되어야 하고 공개 방법을 명시해야 한다.",
+        left_current_state: "비교 대상 문서에는 공개 위치와 공개 방법에 대한 명시 조항이 없다.",
+        risk: "정보주체 안내 미흡으로 공개의무 미충족 위험이 있다.",
+        target_document_id: "doc-policy-001",
+        target_document_title: "개인정보보호 내부 관리 정책",
+        target_section_path:
+          "개인정보보호 내부 관리 정책 > 제3장 > 제12조 > ①",
+        target_section_reason:
+          "처리방침 공개의무를 규정하는 조항 바로 아래에 세부 공개 기준을 넣는 것이 가장 자연스럽다.",
+        recommended_revision:
+          "제12조 제1항 아래에 처리방침 공개 위치와 방법에 관한 세부 문구를 신설한다.",
+        revision_instruction:
+          "비교 대상 문서의 제3장 > 제12조 > ① 위치에 처리방침 공개 위치, 공개 방식, 접근성 기준을 명시하는 문구를 신설하라.",
+        revision_example:
+          "개인정보처리자는 개인정보 처리방침을 홈페이지 첫 화면 또는 정보주체가 쉽게 확인할 수 있는 위치에 공개하여야 한다.",
+        policy_evidence_paths: [
+          "개인정보보호 내부 관리 정책 > 제3장 > 제12조 > ①",
+        ],
+        comparison_source_title: "개인정보 보호법",
+        comparison_evidence_paths: ["개인정보 보호법 > 제3장 > 제31조 > ①"],
+        confidence: 0.95,
+      },
+    ],
+    well_covered_items: [
+      {
+        topic: "수집 목적 명시",
+        reason: "비교 대상 문서가 수집 목적과 최소수집 원칙을 이미 규정하고 있다.",
+        policy_evidence_paths: [
+          "개인정보보호 내부 관리 정책 > 제2장 > 제5조 > ①",
+        ],
+        comparison_evidence_paths: ["개인정보 보호법 > 제15조 > ①"],
+      },
+    ],
+    document_actions: [
+      {
+        document_id: "doc-policy-001",
+        document_title: "개인정보보호 내부 관리 정책",
+        actions: [
+          {
+            priority: "상",
+            target_section_path:
+              "개인정보보호 내부 관리 정책 > 제3장 > 제12조 > ①",
+            current_issue:
+              "처리방침 공개 의무는 있으나 공개 위치와 방법이 불명확하다.",
+            action: "신설",
+            required_change:
+              "공개 위치, 공개 방식, 접근성 기준을 명시하는 문구 추가",
+            instruction:
+              "제12조 제1항 아래에 정보주체가 쉽게 확인 가능한 공개 위치 및 방법 기준을 추가한다.",
+            draft_revision_text:
+              "개인정보처리자는 개인정보 처리방침을 홈페이지 첫 화면 또는 정보주체가 쉽게 확인할 수 있는 위치에 공개하여야 한다.",
+            rationale:
+              "공개의무의 실효성을 확보하려면 위치와 방법을 구체화해야 한다.",
+          },
+        ],
+      },
+    ],
+    low_confidence_notes: [
+      "일부 기준 문서는 공공기관 중심으로 서술되어 있어 일반 기업 적용 시 해석 보정이 필요할 수 있다.",
+    ],
+    remaining_watchpoints: [
+      "개정 후에도 시행령 및 안전성 확보조치 기준과의 정합성을 추가 점검할 필요가 있다.",
+    ],
+  },
+  null,
+  2,
+);

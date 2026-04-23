@@ -2139,15 +2139,31 @@ async function invokeEdgeFunctionHttp<TBody extends Record<string, unknown>>(
     };
   }
 
-  const response = await fetch(`${supabaseUrl}/functions/v1/${functionName}`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      apikey: anonKey,
-      Authorization: `Bearer ${accessToken}`,
-    },
-    body: JSON.stringify(body),
-  });
+  let response: Response;
+  try {
+    response = await fetch(`${supabaseUrl}/functions/v1/${functionName}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        apikey: anonKey,
+        Authorization: `Bearer ${accessToken}`,
+      },
+      body: JSON.stringify(body),
+    });
+  } catch (error) {
+    const message =
+      error instanceof Error && error.message
+        ? error.message
+        : "Failed to fetch";
+    return {
+      data: null,
+      error: new Error(
+        message === "Failed to fetch"
+          ? "Failed to fetch: 네트워크 연결 또는 Supabase Function 접근에 실패했습니다."
+          : message,
+      ),
+    };
+  }
 
   if (!response.ok) {
     const error = new Error(`Function request failed: ${response.status}`) as Error & {
@@ -2181,7 +2197,7 @@ async function invokeEdgeFunctionHttp<TBody extends Record<string, unknown>>(
 async function getFreshAuthenticatedSession() {
   const session = await ensureAuthenticatedSession();
 
-  if (!session.refresh_token) {
+  if (!session.refresh_token || !isSessionExpiredOrNearExpiry(session)) {
     return session;
   }
 

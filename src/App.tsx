@@ -33,6 +33,7 @@ import {
   reparseLawSource,
   reparseDocument,
   runComparison,
+  saveAiReportHistoryEntry,
   savePolicyUserOpenAiSettings,
   saveReviewExecutionHistoryEntry,
   updateReviewExecutionHistoryStatus,
@@ -654,14 +655,41 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
         return;
       }
 
+      const finalGuidance = {
+        left_group_report: leftStage.left_group_report as NonNullable<typeof leftStage.left_group_report>,
+        right_group_report: rightStage.right_group_report as NonNullable<typeof rightStage.right_group_report>,
+        comparison_report: finalStage.comparison_report as NonNullable<typeof finalStage.comparison_report>,
+        model: finalStage.model,
+        api_call_count: finalStage.api_call_count,
+      };
+
+      let aiHistorySaveError: string | null = null;
+      try {
+        await saveAiReportHistoryEntry({
+          title: buildAiReportHistoryTitle({
+            leftDocumentCount: comparisonTargetDocumentIds.length,
+            rightDocumentCount: comparisonReferenceDocumentIds.length,
+            rightLawCount: selectedLawVersionIds.length,
+          }),
+          selectionSummary: getSelectionSummary(
+            comparisonTargetDocumentIds.length,
+            comparisonReferenceDocumentIds.length,
+            selectedLawVersionIds.length,
+          ),
+          selectionCounts: {
+            leftDocumentCount: comparisonTargetDocumentIds.length,
+            rightDocumentCount: comparisonReferenceDocumentIds.length,
+            rightLawCount: selectedLawVersionIds.length,
+          },
+          guidance: finalGuidance,
+        });
+      } catch (error) {
+        aiHistorySaveError =
+          error instanceof Error ? error.message : "AI 리포트 이력 저장에 실패했습니다.";
+      }
+
       setComparisonAnalysisState({
-        aiGuidance: {
-          left_group_report: leftStage.left_group_report as NonNullable<typeof leftStage.left_group_report>,
-          right_group_report: rightStage.right_group_report as NonNullable<typeof rightStage.right_group_report>,
-          comparison_report: finalStage.comparison_report as NonNullable<typeof finalStage.comparison_report>,
-          model: finalStage.model,
-          api_call_count: finalStage.api_call_count,
-        },
+        aiGuidance: finalGuidance,
         leftGroupReport: leftStage.left_group_report,
         rightGroupReport: rightStage.right_group_report,
         comparisonReport: finalStage.comparison_report,
@@ -672,7 +700,11 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
         analysisStagePhase: "complete",
         analysisStageStartedAt: Date.now(),
       });
-      setStatus("3단계 최종 비교 리포트 생성이 완료되었습니다.");
+      setStatus(
+        aiHistorySaveError
+          ? `3단계 최종 비교 리포트 생성은 완료됐지만 AI 리포트 이력 저장에 실패했습니다. ${aiHistorySaveError}`
+          : "3단계 최종 비교 리포트 생성이 완료되었습니다. AI 리포트 이력에도 저장했습니다.",
+      );
       setActiveWorkspaceSection("results");
     })().catch((error: Error) => {
       if (cancelled) {
@@ -3115,6 +3147,14 @@ function formatDateStamp(date: Date) {
   const hour = String(date.getHours()).padStart(2, "0");
   const minute = String(date.getMinutes()).padStart(2, "0");
   return `${year}${month}${day}-${hour}${minute}`;
+}
+
+function buildAiReportHistoryTitle(selectionCounts: {
+  leftDocumentCount: number;
+  rightDocumentCount: number;
+  rightLawCount: number;
+}) {
+  return `비교 대상 ${selectionCounts.leftDocumentCount}건 · 기준 문서 ${selectionCounts.rightDocumentCount}건 · 법령 ${selectionCounts.rightLawCount}건`;
 }
 
 function getComparisonDisabledReason(session: Session | null, isSupabaseConfigured: boolean) {

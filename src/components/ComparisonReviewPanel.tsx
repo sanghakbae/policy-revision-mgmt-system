@@ -1,4 +1,4 @@
-import { useEffect, useEffectEvent, useRef, useState } from "react";
+import { useEffect, useEffectEvent, useRef, useState, type ReactNode } from "react";
 import {
   classifyRevision,
   deleteAiReportHistoryEntry,
@@ -87,9 +87,6 @@ export function ComparisonReviewPanel({
   const [isClassifying, setIsClassifying] = useState(false);
   const [savedHistory, setSavedHistory] = useState<AiReportHistoryEntry[]>([]);
   const [loadedHistoryEntry, setLoadedHistoryEntry] = useState<AiReportHistoryEntry | null>(null);
-  const [historyHydrated, setHistoryHydrated] = useState(false);
-  const lastAutoSavedSignatureRef = useRef<string | null>(null);
-  const pendingAutoSaveSignatureRef = useRef<string | null>(null);
   const selectionSummary = getSelectionSummary(
     selectedDocumentIds.length,
     referenceDocumentIds.length,
@@ -126,17 +123,40 @@ export function ComparisonReviewPanel({
   }, [analysisState.analysisStageStartedAt, analysisState.isAnalyzingSelection]);
 
   useEffect(() => {
-    setHistoryHydrated(false);
     listAiReportHistory()
       .then((entries) => {
         setSavedHistory(entries);
-        setHistoryHydrated(true);
       })
       .catch((error: Error) => {
-        setHistoryHydrated(true);
         emitStatus(error.message);
       });
   }, [emitStatus]);
+
+  useEffect(() => {
+    if (viewMode !== "results") {
+      return;
+    }
+
+    if (analysisState.aiGuidance || loadedHistoryEntry || savedHistory.length === 0) {
+      return;
+    }
+
+    const bestEntry = findBestHistoryEntry(savedHistory, selectionSummary, selectionCounts);
+    if (!bestEntry) {
+      return;
+    }
+
+    setLoadedHistoryEntry(bestEntry);
+    emitStatus(`저장된 AI 리포트 이력을 자동으로 불러왔습니다. (${formatSavedHistoryTimestamp(bestEntry.createdAt)})`);
+  }, [
+    analysisState.aiGuidance,
+    emitStatus,
+    loadedHistoryEntry,
+    savedHistory,
+    selectionCounts,
+    selectionSummary,
+    viewMode,
+  ]);
 
   useEffect(() => {
     onOverviewChange?.({
@@ -146,53 +166,6 @@ export function ComparisonReviewPanel({
       stageProgress,
     });
   }, [analysisState.apiCallCount, onOverviewChange, selectionCounts, selectionSummary, stageProgress]);
-
-  useEffect(() => {
-    if (!analysisState.aiGuidance || !historyHydrated) {
-      return;
-    }
-
-    const signature = buildSavedHistorySignature({
-      selectionCounts,
-      guidance: analysisState.aiGuidance,
-    });
-    if (lastAutoSavedSignatureRef.current === signature) {
-      return;
-    }
-
-    if (pendingAutoSaveSignatureRef.current === signature) {
-      return;
-    }
-
-    const exists = savedHistory.some((entry) =>
-      buildSavedHistorySignature({
-        selectionCounts: entry.selectionCounts,
-        guidance: entry.guidance,
-      }) === signature,
-    );
-    if (exists) {
-      lastAutoSavedSignatureRef.current = signature;
-      return;
-    }
-
-    pendingAutoSaveSignatureRef.current = signature;
-    saveAiReportHistoryEntry({
-      title: buildSavedHistoryTitle(selectionCounts),
-      selectionSummary,
-      selectionCounts,
-      guidance: analysisState.aiGuidance,
-    })
-      .then((entry) => {
-        setSavedHistory((current) => [entry, ...current].slice(0, 50));
-        lastAutoSavedSignatureRef.current = signature;
-        pendingAutoSaveSignatureRef.current = null;
-        emitStatus("현재 AI 비교 리포트를 DB 이력에 자동 저장했습니다.");
-      })
-      .catch((error: Error) => {
-        pendingAutoSaveSignatureRef.current = null;
-        emitStatus(error.message);
-      });
-  }, [analysisState.aiGuidance, emitStatus, historyHydrated, savedHistory, selectionCounts, selectionSummary]);
 
   useEffect(() => {
     if (comparisonRunIds.length > 1) {
@@ -659,10 +632,26 @@ function AiGuidancePanel(input: {
   onSaveCurrentReport: () => void;
   isHistoryView?: boolean;
 }) {
+  const [collapsedSections, setCollapsedSections] = useState({
+    left: false,
+    right: false,
+    final: false,
+  });
+  const resultColumnTemplate = [
+    collapsedSections.left ? "92px" : "minmax(0, 1fr)",
+    collapsedSections.right ? "92px" : "minmax(0, 1fr)",
+    collapsedSections.final ? "92px" : "minmax(0, 1fr)",
+  ].join(" ");
+
   return (
     <section className={`review-column comparison-ai-shell ${input.className ?? ""}`.trim()}>
-      <div className="comparison-result-columns">
+      <div className="comparison-result-columns" style={{ gridTemplateColumns: resultColumnTemplate }}>
         <GroupReportSection
+          collapsedClassName={collapsedSections.left ? "is-collapsed" : ""}
+          collapsed={collapsedSections.left}
+          onToggleCollapse={() =>
+            setCollapsedSections((current) => ({ ...current, left: !current.left }))
+          }
           stepLabel="1단계"
           frameClassName="comparison-review-stage-frame-step-1"
           title="비교 대상 정리"
@@ -684,6 +673,11 @@ function AiGuidancePanel(input: {
           isHistoryView={input.isHistoryView}
         />
         <GroupReportSection
+          collapsedClassName={collapsedSections.right ? "is-collapsed" : ""}
+          collapsed={collapsedSections.right}
+          onToggleCollapse={() =>
+            setCollapsedSections((current) => ({ ...current, right: !current.right }))
+          }
           stepLabel="2단계"
           frameClassName="comparison-review-stage-frame-step-2"
           title="기준 정리"
@@ -705,6 +699,11 @@ function AiGuidancePanel(input: {
           isHistoryView={input.isHistoryView}
         />
         <ComparisonReportSection
+          collapsedClassName={collapsedSections.final ? "is-collapsed" : ""}
+          collapsed={collapsedSections.final}
+          onToggleCollapse={() =>
+            setCollapsedSections((current) => ({ ...current, final: !current.final }))
+          }
           stepLabel="3단계"
           frameClassName="comparison-review-stage-frame-step-3"
           title="최종 비교 리포트"
@@ -764,11 +763,11 @@ function SavedAnalysisHistorySection(input: {
                 {pageEntries.map((entry) => (
                   <tr key={entry.id}>
                     <td>{formatSavedHistoryTimestamp(entry.createdAt)}</td>
-                    <td>
+                    <td className="comparison-history-table-cell-left">
                       <strong>{entry.title}</strong>
                     </td>
-                    <td>{entry.selectionSummary}</td>
-                    <td>
+                    <td className="comparison-history-table-cell-left">{entry.selectionSummary}</td>
+                    <td className="comparison-history-table-cell-left">
                       비교 대상 {entry.selectionCounts.leftDocumentCount}건
                       <br />
                       기준 문서 {entry.selectionCounts.rightDocumentCount}건
@@ -815,6 +814,7 @@ type GuidanceItem = {
   id: string;
   title: string;
   priority: string;
+  changeType: string;
   targetPath: string;
   targetPathReason: string;
   comparisonSourceTitle: string;
@@ -848,6 +848,9 @@ type GroupRequirementItem = {
 };
 
 function GroupReportSection(input: {
+  collapsedClassName?: string;
+  collapsed?: boolean;
+  onToggleCollapse?: () => void;
   stepLabel: string;
   frameClassName?: string;
   title: string;
@@ -862,12 +865,21 @@ function GroupReportSection(input: {
   const requirementRows = buildRequirementRows(input.requirements);
   return (
     <section
-      className={`review-column comparison-source-column comparison-review-stage-frame comparison-report-block ${input.frameClassName ?? ""}`.trim()}
+      className={`review-column comparison-source-column comparison-review-stage-frame comparison-report-block ${input.frameClassName ?? ""} ${input.collapsedClassName ?? ""}`.trim()}
     >
       <div className="section-header comparison-frame-header comparison-stage-frame-header">
         <div className="comparison-stage-frame-head">
-          <h3>{input.title}</h3>
-          <span className="comparison-report-stage-step">{input.stepLabel}</span>
+          <div className="comparison-stage-frame-title-row">
+            {!input.collapsed ? <h3>{input.title}</h3> : null}
+            <span className="comparison-report-stage-step">{input.stepLabel}</span>
+          </div>
+          <button
+            type="button"
+            className="button ghost comparison-section-toggle"
+            onClick={input.onToggleCollapse}
+          >
+            {input.collapsed ? "펼치기" : "접기"}
+          </button>
         </div>
         {input.isHistoryView ? (
           <button
@@ -889,47 +901,54 @@ function GroupReportSection(input: {
             CSV 내보내기
           </button>
         ) : null}
-        <p>{input.description}</p>
+        {!input.collapsed ? <p>{input.description}</p> : null}
       </div>
-      <SummarySection summary={input.summary} emptyText="요약이 없습니다." />
-      <ReportTableSection
-        title="핵심 정리"
-        columns={["번호", "내용"]}
-        rows={input.keyFindings.map((item, index) => [String(index + 1), item])}
-        emptyText="핵심 정리 항목이 없습니다."
-        leftAlignValues={input.isHistoryView}
-      />
-      <section className="review-column">
-        <div className="section-header compact-section-header">
-          <h3>{`${input.title} 문서별 정리`}</h3>
-        </div>
-        <ReportTableSection
-          title=""
-          columns={["문서", "핵심 정리", "근거 경로"]}
-          rows={documentRows}
-          emptyText="문서별 정리 항목이 없습니다."
-          hideTitle
-          leftAlignValues={input.isHistoryView}
-        />
-      </section>
-      <section className="review-column">
-        <div className="section-header compact-section-header">
-          <h3>{`${input.title} 통합 요구사항`}</h3>
-        </div>
-        <ReportTableSection
-          title=""
-          columns={["주제", "내용", "출처 문서", "근거 경로", "비고"]}
-          rows={requirementRows}
-          emptyText="통합 요구사항이 없습니다."
-          hideTitle
-          leftAlignValues={input.isHistoryView}
-        />
-      </section>
+      {!input.collapsed ? (
+        <>
+          <SummarySection summary={input.summary} emptyText="요약이 없습니다." />
+          <ReportTableSection
+            title="핵심 정리"
+            columns={["번호", "내용"]}
+            rows={input.keyFindings.map((item, index) => [String(index + 1), item])}
+            emptyText="핵심 정리 항목이 없습니다."
+            leftAlignValues={input.isHistoryView}
+          />
+          <section className="review-column">
+            <div className="section-header compact-section-header">
+              <h3>{`${input.title} 문서별 정리`}</h3>
+            </div>
+            <ReportTableSection
+              title=""
+              columns={["문서", "핵심 정리", "근거 경로"]}
+              rows={documentRows}
+              emptyText="문서별 정리 항목이 없습니다."
+              hideTitle
+              leftAlignValues={input.isHistoryView}
+            />
+          </section>
+          <section className="review-column">
+            <div className="section-header compact-section-header">
+              <h3>{`${input.title} 통합 요구사항`}</h3>
+            </div>
+            <ReportTableSection
+              title=""
+              columns={["주제", "내용", "출처 문서", "근거 경로", "비고"]}
+              rows={requirementRows}
+              emptyText="통합 요구사항이 없습니다."
+              hideTitle
+              leftAlignValues={input.isHistoryView}
+            />
+          </section>
+        </>
+      ) : null}
     </section>
   );
 }
 
 function ComparisonReportSection(input: {
+  collapsedClassName?: string;
+  collapsed?: boolean;
+  onToggleCollapse?: () => void;
   stepLabel: string;
   frameClassName?: string;
   title: string;
@@ -944,12 +963,21 @@ function ComparisonReportSection(input: {
 
   return (
     <section
-      className={`review-column comparison-source-column comparison-review-stage-frame comparison-report-block ${input.frameClassName ?? ""}`.trim()}
+      className={`review-column comparison-source-column comparison-review-stage-frame comparison-report-block ${input.frameClassName ?? ""} ${input.collapsedClassName ?? ""}`.trim()}
     >
       <div className="section-header comparison-frame-header comparison-stage-frame-header">
         <div className="comparison-stage-frame-head">
-          <h3>{input.title}</h3>
-          <span className="comparison-report-stage-step">{input.stepLabel}</span>
+          <div className="comparison-stage-frame-title-row">
+            {!input.collapsed ? <h3>{input.title}</h3> : null}
+            <span className="comparison-report-stage-step">{input.stepLabel}</span>
+          </div>
+          <button
+            type="button"
+            className="button ghost comparison-section-toggle"
+            onClick={input.onToggleCollapse}
+          >
+            {input.collapsed ? "펼치기" : "접기"}
+          </button>
         </div>
         {input.isHistoryView ? (
           <button
@@ -1005,82 +1033,105 @@ function ComparisonReportSection(input: {
             CSV 내보내기
           </button>
         ) : null}
-        <p>{input.description}</p>
+        {!input.collapsed ? <p>{input.description}</p> : null}
       </div>
-      <SummarySection
-        summary={report?.summary ?? "비교 대상/기준 정리가 끝난 뒤 최종 비교 리포트를 생성합니다."}
-        emptyText="요약이 없습니다."
-      />
-      <GuidanceSection
-        title="개정 필요 항목"
-        emptyText="개정 필요 항목이 없습니다."
-        emptyReason={
-          report
-            ? "오른쪽 기준 대비 즉시 보완이 필요한 차이를 특정하지 못했습니다."
-            : "최종 비교 단계가 아직 완료되지 않았습니다."
-        }
-        items={(report?.gaps ?? []).map((item, index) => ({
-          id: `gap-${index}-${item.topic}`,
-          title: `${item.topic} · ${item.target_document_title}`,
-          priority: item.priority,
-          targetPath: item.target_section_path,
-          targetPathReason: item.target_section_reason,
-          comparisonSourceTitle: item.comparison_source_title,
-          policyEvidence: item.policy_evidence_paths,
-          comparisonEvidence: item.comparison_evidence_paths,
-          action: item.recommended_revision,
-          actionInstruction: item.revision_instruction,
-          actionExample: item.revision_example,
-          confidence: item.confidence,
-          reason: `${item.gap_type} | 우선순위: ${item.priority}\n기준 요구사항: ${item.right_requirement}\n현재 상태: ${item.left_current_state}\n위험: ${item.risk}`,
-        }))}
-        leftAlignValues={input.isHistoryView}
-      />
-      <ReportTableSection
-        title="이미 충분히 반영된 항목"
-        columns={["주제", "판단", "정책 근거", "기준 근거"]}
-        rows={(report?.well_covered_items ?? []).map((item) => [
-          item.topic,
-          item.reason,
-          joinListForCell(item.policy_evidence_paths),
-          joinListForCell(item.comparison_evidence_paths),
-        ])}
-        emptyText="이미 충분히 반영된 항목이 없습니다."
-        leftAlignValues={input.isHistoryView}
-      />
-      <ReportTableSection
-        title="남은 관찰 포인트"
-        columns={["번호", "내용"]}
-        rows={(report?.remaining_watchpoints ?? []).map((item, index) => [String(index + 1), item])}
-        emptyText="남은 관찰 포인트가 없습니다."
-        leftAlignValues={input.isHistoryView}
-      />
-      <ReportTableSection
-        title="저신뢰 메모"
-        columns={["번호", "내용"]}
-        rows={(report?.low_confidence_notes ?? []).map((item, index) => [String(index + 1), item])}
-        emptyText="저신뢰 메모가 없습니다."
-        leftAlignValues={input.isHistoryView}
-      />
-      <ReportTableSection
-        title="문서별 조치"
-        columns={["문서", "조치"]}
-        rows={(report?.document_actions ?? []).flatMap((item) =>
-          item.actions.map((action, index) => [
-            index === 0 ? item.document_title : "",
-            [
-              `[${action.priority}] [${action.action}] ${action.target_section_path}`,
-              `문제: ${action.current_issue}`,
-              `필수 변경: ${action.required_change}`,
-              `수정 지시: ${action.instruction}`,
-              `예시 문안: ${action.draft_revision_text}`,
-              `근거: ${action.rationale}`,
-            ].join("\n"),
-          ]),
-        )}
-        emptyText="문서별 조치가 없습니다."
-        leftAlignValues={input.isHistoryView}
-      />
+      {!input.collapsed ? (
+        <>
+          <SummarySection
+            summary={report?.summary ?? "비교 대상/기준 정리가 끝난 뒤 최종 비교 리포트를 생성합니다."}
+            emptyText="요약이 없습니다."
+          />
+          <GuidanceSection
+            title="개정 필요 항목"
+            emptyText="개정 필요 항목이 없습니다."
+            emptyReason={
+              report
+                ? "오른쪽 기준 대비 즉시 보완이 필요한 차이를 특정하지 못했습니다."
+                : "최종 비교 단계가 아직 완료되지 않았습니다."
+            }
+            items={(report?.gaps ?? []).map((item, index) => ({
+              id: `gap-${index}-${item.topic}`,
+              title: `${item.topic} · ${item.target_document_title}`,
+              priority: item.priority,
+              changeType: item.gap_type,
+              targetPath: item.target_section_path,
+              targetPathReason: item.target_section_reason,
+              comparisonSourceTitle: item.comparison_source_title,
+              policyEvidence: item.policy_evidence_paths,
+              comparisonEvidence: item.comparison_evidence_paths,
+              action: item.recommended_revision,
+              actionInstruction: item.revision_instruction,
+              actionExample: item.revision_example,
+              confidence: item.confidence,
+              reason: `${item.gap_type} | 우선순위: ${item.priority}\n기준 요구사항: ${item.right_requirement}\n현재 상태: ${item.left_current_state}\n위험: ${item.risk}`,
+            }))}
+            leftAlignValues={input.isHistoryView}
+          />
+          <ReportTableSection
+            title="이미 충분히 반영된 항목"
+            columns={["주제", "판단", "정책 근거", "기준 근거"]}
+            rows={(report?.well_covered_items ?? []).map((item) => [
+              item.topic,
+              item.reason,
+              joinListForCell(item.policy_evidence_paths),
+              joinListForCell(item.comparison_evidence_paths),
+            ])}
+            emptyText="이미 충분히 반영된 항목이 없습니다."
+            leftAlignValues={input.isHistoryView}
+          />
+          <ReportTableSection
+            title="남은 관찰 포인트"
+            columns={["번호", "내용"]}
+            rows={(report?.remaining_watchpoints ?? []).map((item, index) => [String(index + 1), item])}
+            emptyText="남은 관찰 포인트가 없습니다."
+            leftAlignValues={input.isHistoryView}
+          />
+          <ReportTableSection
+            title="저신뢰 메모"
+            columns={["번호", "내용"]}
+            rows={(report?.low_confidence_notes ?? []).map((item, index) => [String(index + 1), item])}
+            emptyText="저신뢰 메모가 없습니다."
+            leftAlignValues={input.isHistoryView}
+          />
+          <ReportTableSection
+            title="문서별 조치"
+            columns={["문서", "조치"]}
+            rows={(report?.document_actions ?? []).flatMap((item) =>
+              item.actions
+                .filter((action) => hasVisibleDocumentAction(action))
+                .map((action, index) => [
+                index === 0 ? item.document_title : "",
+                [
+                  `${action.priority}|${action.action}|${action.target_section_path}`,
+                  `문제: ${action.current_issue}`,
+                  `필수 변경: ${action.required_change}`,
+                  `수정 지시: ${action.instruction}`,
+                  `예시 문안: ${action.draft_revision_text}`,
+                  `근거: ${action.rationale}`,
+                ].join("\n"),
+              ]),
+            )}
+            emptyText="문서별 조치가 없습니다."
+            leftAlignValues={input.isHistoryView}
+            renderRow={(row, index) => {
+              const actionText = String(row[1] ?? "");
+              const [headline = "", ...detailLines] = actionText.split("\n");
+              const [priority = "-", action = "-", targetPath = ""] = headline.split("|");
+              return [
+                row[0],
+                <div className="comparison-action-cell" key={`action-${index}`}>
+                  <div className="pill-row">
+                    <span className={`pill ${getPriorityTone(priority)}`}>{priority}</span>
+                    <span className={`pill ${getChangeTypeTone(action)}`}>{action}</span>
+                  </div>
+                  <div className="comparison-action-path">{targetPath}</div>
+                  <div className="comparison-action-body">{detailLines.join("\n")}</div>
+                </div>,
+              ];
+            }}
+          />
+        </>
+      ) : null}
     </section>
   );
 }
@@ -1114,18 +1165,19 @@ function buildSavedHistoryTitle(selectionCounts: AiReportHistoryEntry["selection
   return `비교 대상 ${selectionCounts.leftDocumentCount}건 · 기준 문서 ${selectionCounts.rightDocumentCount}건 · 법령 ${selectionCounts.rightLawCount}건`;
 }
 
-function buildSavedHistorySignature(input: {
-  selectionCounts: AiReportHistoryEntry["selectionCounts"];
-  guidance: AiRevisionGuidance;
-}) {
-  return JSON.stringify({
-    selectionCounts: input.selectionCounts,
-    model: input.guidance.model,
-    apiCallCount: input.guidance.api_call_count,
-    leftSummary: input.guidance.left_group_report.summary,
-    rightSummary: input.guidance.right_group_report.summary,
-    comparisonSummary: input.guidance.comparison_report.summary,
-  });
+function findBestHistoryEntry(
+  entries: AiReportHistoryEntry[],
+  selectionSummary: string,
+  selectionCounts: AiReportHistoryEntry["selectionCounts"],
+) {
+  const exactMatch = entries.find((entry) =>
+    entry.selectionSummary === selectionSummary &&
+    entry.selectionCounts.leftDocumentCount === selectionCounts.leftDocumentCount &&
+    entry.selectionCounts.rightDocumentCount === selectionCounts.rightDocumentCount &&
+    entry.selectionCounts.rightLawCount === selectionCounts.rightLawCount,
+  );
+
+  return exactMatch ?? entries[0] ?? null;
 }
 
 export function getStageProgress(input: {
@@ -1261,10 +1313,11 @@ function GuidanceSection(input: {
 function ReportTableSection(input: {
   title: string;
   columns: string[];
-  rows: string[][];
+  rows: Array<Array<ReactNode>>;
   emptyText: string;
   hideTitle?: boolean;
   leftAlignValues?: boolean;
+  renderRow?: (row: Array<ReactNode>, index: number) => Array<ReactNode>;
 }) {
   return (
     <section className="review-column comparison-table-section">
@@ -1288,20 +1341,30 @@ function ReportTableSection(input: {
                 {input.columns.map((column, index) => (
                   <td
                     key={`${input.title}-empty-${column}`}
-                    className={`comparison-table-empty ${index === 0 ? "comparison-table-empty-primary" : ""}`.trim()}
+                    className={`comparison-table-empty ${index === 0 ? "comparison-table-empty-primary" : ""} ${
+                      shouldLeftAlignComparisonColumn(input.columns[index] ?? "") ? "comparison-cell-left" : ""
+                    }`.trim()}
                   >
                     {index === 0 ? input.emptyText : "-"}
                   </td>
                 ))}
               </tr>
             ) : (
-              input.rows.map((row, index) => (
+              input.rows.map((rawRow, index) => {
+                const row = input.renderRow ? input.renderRow(rawRow, index) : rawRow;
+                return (
                 <tr key={`${input.title}-${index}`}>
                   {row.map((cell, cellIndex) => (
-                    <td key={`${input.title}-${index}-${cellIndex}`}>{cell}</td>
+                    <td
+                      key={`${input.title}-${index}-${cellIndex}`}
+                      className={shouldLeftAlignComparisonColumn(input.columns[cellIndex] ?? "") ? "comparison-cell-left" : ""}
+                    >
+                      {cell}
+                    </td>
                   ))}
                 </tr>
-              ))
+              );
+              })
             )}
           </tbody>
         </table>
@@ -1365,10 +1428,14 @@ function buildDocumentRows(items: GroupDocumentItem[]) {
     return rows
       .filter((pair, index) => index === 0 || pair.keyPoint.trim() || pair.sourcePath.trim())
       .map((pair, index) => [
-      index === 0 ? item.title : "",
-      pair.keyPoint.trim(),
-      pair.sourcePath.trim(),
-    ]);
+        index === 0 ? item.title : "",
+        pair.keyPoint.trim(),
+        pair.sourcePath.trim(),
+      ])
+      .filter((row) => {
+        const [title, keyPoint] = row;
+        return String(title).trim().length > 0 || String(keyPoint).trim().length > 0;
+      });
   });
 }
 
@@ -1380,12 +1447,21 @@ function buildRequirementRows(items: GroupRequirementItem[]) {
     return rows
       .filter((pair, index) => index === 0 || pair.sourceTitle.trim() || pair.sourcePath.trim())
       .map((pair, index) => [
-      index === 0 ? item.topic : "",
-      index === 0 ? item.detail : "",
-      pair.sourceTitle.trim(),
-      pair.sourcePath.trim(),
-      index === 0 ? item.notes || "" : "",
-    ]);
+        index === 0 ? item.topic : "",
+        index === 0 ? item.detail : "",
+        pair.sourceTitle.trim(),
+        pair.sourcePath.trim(),
+        index === 0 ? item.notes || "" : "",
+      ])
+      .filter((row) => {
+        const [topic, detail, sourceTitle, , notes] = row;
+        return (
+          String(topic).trim().length > 0 ||
+          String(detail).trim().length > 0 ||
+          String(sourceTitle).trim().length > 0 ||
+          String(notes).trim().length > 0
+        );
+      });
   });
 }
 
@@ -1428,22 +1504,73 @@ function zipEvidencePairs(left: string[], right: string[]) {
 }
 
 function buildGuidanceRows(items: GuidanceItem[]) {
-  return items.flatMap((item) => {
-    const rowCount = Math.max(item.policyEvidence.length, item.comparisonEvidence.length, 1);
-    return Array.from({ length: rowCount }, (_, index) => [
-      index === 0 ? item.title : "",
-      index === 0 ? `${item.targetPath}\n${item.targetPathReason}`.trim() : "",
-      index === 0 ? item.comparisonSourceTitle : "",
-      item.policyEvidence[index] ?? "",
-      item.comparisonEvidence[index] ?? "",
-      index === 0 ? `[${item.priority}] ${item.action}\n${item.actionInstruction}`.trim() : "",
-      index === 0 ? item.actionExample : "",
-      index === 0 ? `${Math.round(item.confidence * 100)}%` : "",
-      index === 0 ? item.reason : "",
-    ]).filter((row, index) =>
-      index === 0 || String(row[3]).trim().length > 0 || String(row[4]).trim().length > 0,
-    );
-  });
+  return items.map((item) => [
+    <div className="comparison-guidance-topic-cell" key={`${item.id}-topic`}>
+      <div>{item.title}</div>
+      <div className="pill-row">
+        <span className={`pill ${getPriorityTone(item.priority)}`}>{item.priority}</span>
+        <span className={`pill ${getChangeTypeTone(item.changeType)}`}>{item.changeType}</span>
+      </div>
+    </div>,
+    `${item.targetPath}\n${item.targetPathReason}`.trim(),
+    item.comparisonSourceTitle,
+    joinListForCell(item.policyEvidence),
+    joinListForCell(item.comparisonEvidence),
+    `${item.action}\n${item.actionInstruction}`.trim(),
+    item.actionExample,
+    `${Math.round(item.confidence * 100)}%`,
+    item.reason,
+  ]);
+}
+
+function hasVisibleDocumentAction(action: AiComparisonReport["document_actions"][number]["actions"][number]) {
+  return [
+    action.target_section_path,
+    action.current_issue,
+    action.required_change,
+    action.instruction,
+    action.draft_revision_text,
+    action.rationale,
+  ].some((value) => String(value ?? "").trim().length > 0);
+}
+
+function shouldLeftAlignComparisonColumn(column: string) {
+  return [
+    "내용",
+    "핵심 정리",
+    "권고",
+    "예시 문안",
+    "판단",
+    "판단 근거",
+    "조치",
+    "수정 위치",
+  ].includes(column);
+}
+
+function getChangeTypeTone(value: string) {
+  if (value.includes("신설")) {
+    return "accent";
+  }
+  if (value.includes("수정")) {
+    return "warning";
+  }
+  if (value.includes("삭제")) {
+    return "danger";
+  }
+  return "neutral";
+}
+
+function getPriorityTone(value: string) {
+  if (value === "상") {
+    return "danger";
+  }
+  if (value === "중") {
+    return "warning";
+  }
+  if (value === "하") {
+    return "neutral";
+  }
+  return "neutral";
 }
 
 function toRevisionStatusLabel(status: ComparisonReviewDetail["revision_status"]) {
