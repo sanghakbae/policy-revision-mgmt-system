@@ -1525,7 +1525,6 @@ function buildGuidanceRows(items: GuidanceItem[]) {
 
 function hasVisibleDocumentAction(action: AiComparisonReport["document_actions"][number]["actions"][number]) {
   return [
-    action.target_section_path,
     action.current_issue,
     action.required_change,
     action.instruction,
