@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import * as XLSX from "xlsx";
 import { AuthPanel } from "./components/AuthPanel";
 import {
   ComparisonReviewPanel,
@@ -22,6 +23,8 @@ import {
   deleteWorkspaceFavorite,
   deleteLawSource,
   deleteDocument,
+  getDocumentDetail,
+  getPolicyUserOpenAiSettings,
   listComparisonRuns,
   listDocuments,
   listLawVersions,
@@ -30,10 +33,12 @@ import {
   reparseLawSource,
   reparseDocument,
   runComparison,
+  savePolicyUserOpenAiSettings,
   saveReviewExecutionHistoryEntry,
   updateReviewExecutionHistoryStatus,
   saveWorkspaceFavorite,
   uploadDocument,
+  uploadStructuredRowsDocument,
 } from "./lib/documentService";
 import {
   clearSupabaseAuthStorage,
@@ -59,6 +64,7 @@ type NoticeTone = "info" | "success" | "warning" | "danger";
 type PersistedWorkspaceSelection = WorkspaceSelectionSnapshot;
 type LawDashboardCategory = "법률" | "시행령" | "시행규칙" | "기준";
 const DEFAULT_OPENAI_MODEL = "gpt-5.2";
+const DOCUMENT_PARSER_REPARSE_VERSION = "preserve-deleted-and-amended-items-v11";
 
 type AppNotice = {
   tone: NoticeTone;
@@ -78,6 +84,18 @@ type WorkspaceSection =
   | "aiHistory"
   | "settings";
 
+const WORKSPACE_SECTION_STORAGE_KEY = "policy-revision-mgmt-active-workspace-section";
+const WORKSPACE_SECTIONS: WorkspaceSection[] = [
+  "dashboard",
+  "documents",
+  "comparison",
+  "results",
+  "history",
+  "aiHistory",
+  "settings",
+];
+const ALLOWED_EMAIL_DOMAIN = import.meta.env.VITE_ALLOWED_DOMAIN?.trim().toLowerCase() || null;
+
 function getPortalWorkspaceSection(
   embeddedContext?: { project?: string; view?: string; embedded?: boolean },
 ): WorkspaceSection | null {
@@ -85,15 +103,7 @@ function getPortalWorkspaceSection(
     return null;
   }
 
-  const validSections: WorkspaceSection[] = [
-    "documents",
-    "comparison",
-    "results",
-    "history",
-    "settings",
-  ];
-
-  return validSections.includes(embeddedContext.view as WorkspaceSection)
+  return WORKSPACE_SECTIONS.includes(embeddedContext.view as WorkspaceSection)
     ? (embeddedContext.view as WorkspaceSection)
     : null;
 }
@@ -140,7 +150,10 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
   const [comparisonReferenceDocumentIds, setComparisonReferenceDocumentIds] = useState<string[]>([]);
   const [draggingDocumentId, setDraggingDocumentId] = useState<string | null>(null);
   const [deletingDocumentId, setDeletingDocumentId] = useState<string | null>(null);
+  const [pendingDeleteDocumentId, setPendingDeleteDocumentId] = useState<string | null>(null);
   const [reparsingDocumentId, setReparsingDocumentId] = useState<string | null>(null);
+  const [isReparsingAllDocuments, setIsReparsingAllDocuments] = useState(false);
+  const documentXlsxImportInputRef = useRef<HTMLInputElement | null>(null);
   const [selectedLawVersionIds, setSelectedLawVersionIds] = useState<string[]>([]);
   const [selectedComparisonRunId, setSelectedComparisonRunId] = useState<string | null>(
     null,
@@ -157,8 +170,11 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
     model: DEFAULT_OPENAI_MODEL,
   });
   const [openAiSettingsHydrated, setOpenAiSettingsHydrated] = useState(false);
+  const openAiSettingsSaveTimerRef = useRef<number | null>(null);
+  const openAiSettingsDirtyRef = useRef(false);
+  const openAiSettingsSaveRequestIdRef = useRef(0);
   const [activeWorkspaceSection, setActiveWorkspaceSection] = useState<WorkspaceSection>(
-    () => portalWorkspaceSection ?? "dashboard",
+    () => portalWorkspaceSection ?? readWorkspaceSection() ?? "dashboard",
   );
   const [appNotice, setAppNoticeState] = useState<AppNotice | null>(null);
   const [comparisonOverview, setComparisonOverview] = useState<ComparisonReviewOverviewSnapshot | null>(null);
@@ -191,6 +207,29 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
       title: message,
       detail: inferNoticeDetail(message),
       actions: inferNoticeActions(message),
+    });
+  }
+
+  function isAllowedEmailDomain(email?: string | null) {
+    if (!ALLOWED_EMAIL_DOMAIN) {
+      return true;
+    }
+
+    const normalizedEmail = email?.trim().toLowerCase() ?? "";
+    return normalizedEmail.endsWith(`@${ALLOWED_EMAIL_DOMAIN}`);
+  }
+
+  async function rejectDisallowedSession(email?: string | null) {
+    clearSupabaseAuthStorage();
+    setSession(null);
+    setAppNotice({
+      tone: "danger",
+      label: "인증 제한",
+      title: "허용되지 않은 Google Workspace 도메인입니다.",
+      detail: ALLOWED_EMAIL_DOMAIN
+        ? `${ALLOWED_EMAIL_DOMAIN} 계정만 로그인할 수 있습니다. 현재 계정: ${email ?? "알 수 없음"}`
+        : "허용 도메인 설정을 확인하세요.",
+      actions: ["허용된 계정으로 다시 로그인하세요."],
     });
   }
 
@@ -296,6 +335,14 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
             });
             return;
           }
+
+          if (!isAllowedEmailDomain(user.email)) {
+            if (cancelled) {
+              return;
+            }
+            await rejectDisallowedSession(user.email);
+            return;
+          }
         }
 
         if (cancelled) {
@@ -359,6 +406,10 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
       }
 
       if (event === "SIGNED_IN" || event === "USER_UPDATED") {
+        if (nextSession?.user && !isAllowedEmailDomain(nextSession.user.email)) {
+          await rejectDisallowedSession(nextSession.user.email);
+          return;
+        }
         setSession(nextSession);
         setAppNotice({
           tone: "success",
@@ -398,6 +449,14 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
   }, [embeddedWorkspace, portalWorkspaceSection]);
 
   useEffect(() => {
+    if (embeddedWorkspace) {
+      return;
+    }
+
+    writeWorkspaceSection(activeWorkspaceSection);
+  }, [activeWorkspaceSection, embeddedWorkspace]);
+
+  useEffect(() => {
     if (!isSupabaseConfigured) {
       return;
     }
@@ -413,6 +472,8 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
       setComparisonTargetDocumentIds([]);
       setComparisonReferenceDocumentIds([]);
       setDraggingDocumentId(null);
+      setPendingDeleteDocumentId(null);
+      setIsReparsingAllDocuments(false);
       setSelectedLawVersionIds([]);
       setSelectedComparisonRunId(null);
       setAnalysisRequestKey(0);
@@ -484,6 +545,18 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
       })
       .finally(() => undefined);
   }, [sessionUserId, isSupabaseConfigured, workspaceSelectionHydrated]);
+
+  useEffect(() => {
+    if (!sessionUserId || documents.length === 0 || isReparsingAllDocuments) {
+      return;
+    }
+
+    if (readDocumentParserReparseVersion(sessionUserId) === DOCUMENT_PARSER_REPARSE_VERSION) {
+      return;
+    }
+
+    void handleReparseAllDocuments({ automatic: true });
+  }, [sessionUserId, documents, isReparsingAllDocuments]);
 
   useEffect(() => {
     const hasSelectionContext =
@@ -727,17 +800,79 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
   ]);
 
   useEffect(() => {
-    setOpenAiSettings(readOpenAiSettings(sessionUserId));
-    setOpenAiSettingsHydrated(true);
-  }, [sessionUserId]);
+    let cancelled = false;
+
+    if (!session?.access_token) {
+      openAiSettingsDirtyRef.current = false;
+      setOpenAiSettings({
+        apiKey: "",
+        model: DEFAULT_OPENAI_MODEL,
+      });
+      setOpenAiSettingsHydrated(true);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    setOpenAiSettingsHydrated(false);
+    getPolicyUserOpenAiSettings(DEFAULT_OPENAI_MODEL)
+      .then((settings) => {
+        if (cancelled) {
+          return;
+        }
+        openAiSettingsDirtyRef.current = false;
+        setOpenAiSettings(settings);
+        setOpenAiSettingsHydrated(true);
+      })
+      .catch(() => {
+        if (cancelled) {
+          return;
+        }
+        openAiSettingsDirtyRef.current = false;
+        setOpenAiSettings({
+          apiKey: "",
+          model: DEFAULT_OPENAI_MODEL,
+        });
+        setOpenAiSettingsHydrated(true);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [session?.access_token]);
 
   useEffect(() => {
-    if (!openAiSettingsHydrated) {
+    if (!openAiSettingsHydrated || !session?.access_token) {
       return;
     }
 
-    writeOpenAiSettings(openAiSettings);
-  }, [openAiSettings, openAiSettingsHydrated]);
+    if (!openAiSettingsDirtyRef.current) {
+      return;
+    }
+
+    if (openAiSettingsSaveTimerRef.current !== null) {
+      window.clearTimeout(openAiSettingsSaveTimerRef.current);
+    }
+
+    const requestId = openAiSettingsSaveRequestIdRef.current + 1;
+    openAiSettingsSaveRequestIdRef.current = requestId;
+    openAiSettingsSaveTimerRef.current = window.setTimeout(() => {
+      void savePolicyUserOpenAiSettings(openAiSettings, DEFAULT_OPENAI_MODEL)
+        .then(() => {
+          if (openAiSettingsSaveRequestIdRef.current === requestId) {
+            openAiSettingsDirtyRef.current = false;
+          }
+        })
+        .catch(() => undefined);
+    }, 400);
+
+    return () => {
+      if (openAiSettingsSaveTimerRef.current !== null) {
+        window.clearTimeout(openAiSettingsSaveTimerRef.current);
+        openAiSettingsSaveTimerRef.current = null;
+      }
+    };
+  }, [openAiSettings, openAiSettingsHydrated, session?.access_token]);
 
   async function handleUpload(file: File, title: string, description: string) {
     setAppNotice({
@@ -798,44 +933,217 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
     }
   }
 
-  async function handleDeleteDocument(document: DocumentSummary) {
-    const confirmationCode = createDeleteConfirmationCode();
-    const copiedToClipboard = await copyTextToClipboard(confirmationCode);
-    const input = window.prompt(
-      [
-        `문서 "${document.title}" 를 삭제합니다.`,
-        "삭제를 계속하려면 아래 확인 코드를 정확히 입력하세요.",
-        confirmationCode,
-        copiedToClipboard
-          ? "확인 코드를 클립보드에 복사했습니다."
-          : "확인 코드를 직접 선택해 복사하세요.",
-      ].join("\n"),
-    );
-
-    if (input === null) {
-      setAppNotice({
-        tone: "info",
-        label: "삭제 취소",
-        title: "문서 삭제를 취소했습니다.",
-        detail: "입력 확인 단계에서 작업이 중단되었습니다.",
-        debug: [`delete cancel document_id=${document.id}`],
-      });
+  async function handleExportDocumentsXlsx() {
+    if (documents.length === 0) {
       return;
     }
 
-    if (input.trim() !== confirmationCode) {
+    setAppNotice({
+      tone: "info",
+      label: "XLSX 내보내기",
+      title: "전체 문서 목록을 XLSX로 생성하는 중입니다...",
+      detail: `${documents.length}개 문서의 장·조·항·호·목과 내용을 불러옵니다.`,
+      debug: [`export document_count=${documents.length}`],
+    });
+
+    try {
+      const workbook = XLSX.utils.book_new();
+      const usedSheetNames = new Set<string>(["문서 목록"]);
+      const indexRows: Array<{
+        번호: number;
+        문서명: string;
+        시트명: string;
+        시행일: string;
+        섹션수: number;
+      }> = [];
+
+      for (const document of documents) {
+        const detail = await getDocumentDetail(document.id);
+        const sheetName = buildUniqueXlsxSheetName(detail.title, usedSheetNames);
+        indexRows.push({
+          번호: indexRows.length + 1,
+          문서명: detail.title,
+          시트명: sheetName,
+          시행일: detail.metadata?.revisionDate ?? "",
+          섹션수: detail.sections.length,
+        });
+        const rows = detail.sections.flatMap((section, index) => buildXlsxContentRows({
+          행번호: index + 1,
+          문서명: detail.title,
+          장: section.chapter_label ?? "",
+          조: section.article_label ?? "",
+          항: section.paragraph_label ?? "",
+          호: section.item_label ?? "",
+          목: section.sub_item_label ?? "",
+          내용: section.original_text,
+        }));
+        const worksheet = XLSX.utils.json_to_sheet(rows.length > 0 ? rows : buildXlsxContentRows({ 행번호: 1, 문서명: detail.title, 장: "", 조: "", 항: "", 호: "", 목: "", 내용: detail.raw_text }));
+        worksheet["!cols"] = [
+          { wch: 60 },
+          { wch: 10 },
+          { wch: 10 },
+          { wch: 10 },
+          { wch: 14 },
+          { wch: 8 },
+          { wch: 8 },
+          { wch: 8 },
+          { wch: 100 },
+        ];
+        XLSX.utils.book_append_sheet(workbook, worksheet, sheetName);
+      }
+
+      const indexWorksheet = XLSX.utils.json_to_sheet(indexRows);
+      indexWorksheet["!cols"] = [
+        { wch: 8 },
+        { wch: 60 },
+        { wch: 34 },
+        { wch: 14 },
+        { wch: 10 },
+      ];
+      workbook.SheetNames.unshift("문서 목록");
+      workbook.Sheets["문서 목록"] = indexWorksheet;
+
+      downloadWorkbookXlsx(workbook, `policy-documents-${formatDateStamp(new Date())}.xlsx`);
+      setAppNotice({
+        tone: "success",
+        label: "XLSX 내보내기 완료",
+        title: "전체 문서 목록을 XLSX로 내보냈습니다.",
+        detail: "각 문서는 시트별로 장·조·항·호·목·내용 컬럼에 담겼습니다.",
+        debug: [`exported document_count=${documents.length}`],
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "XLSX 내보내기 중 오류가 발생했습니다.";
+      setAppNotice({
+        tone: "danger",
+        label: "XLSX 내보내기 실패",
+        title: "XLSX 내보내기 중 오류가 발생했습니다.",
+        detail: message,
+        debug: [`xlsx export error=${message}`],
+      });
+    }
+  }
+
+  async function handleImportDocumentsXlsx(file: File) {
+    setAppNotice({
+      tone: "info",
+      label: "XLSX 가져오기",
+      title: "XLSX 문서를 데이터베이스에 저장하는 중입니다...",
+      detail: "각 시트의 내용 컬럼을 그대로 이어 원문으로 저장합니다.",
+      debug: [`import file=${file.name}`, `size=${file.size}`],
+    });
+
+    try {
+      const workbook = XLSX.read(await file.arrayBuffer(), { type: "array" });
+      const titleBySheetName = readXlsxDocumentTitleMap(workbook);
+      const imports = workbook.SheetNames.filter((sheetName) => sheetName !== "문서 목록").map((sheetName) => {
+        const worksheet = workbook.Sheets[sheetName];
+        const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(worksheet, { defval: "" });
+        const titleFromRows = rows
+          .map((row) => String(row["문서명"] ?? "").trim())
+          .find(Boolean);
+        const structuredRows = buildImportedXlsxRows(rows);
+        const rawText = structuredRows.map((row) => row.content).join("\n");
+
+        return {
+          title: titleFromRows || titleBySheetName.get(sheetName)?.trim() || sheetName.trim() || file.name.replace(/\.[^.]+$/u, ""),
+          rows: structuredRows,
+          rawText,
+        };
+      }).filter((entry) => entry.rawText.trim().length > 0);
+
+      if (imports.length === 0) {
+        throw new Error("가져올 내용 컬럼이 없습니다. XLSX에 '내용' 컬럼이 필요합니다.");
+      }
+
+      for (const entry of imports) {
+        await uploadStructuredRowsDocument({
+          rows: entry.rows,
+          title: entry.title,
+          description: `XLSX import: ${file.name}`,
+          sourceFileName: `${sanitizeFileName(entry.title)}.xlsx`,
+        });
+      }
+
+      const [documentItems, lawVersionItems, comparisonItems] = await Promise.all([
+        listDocuments(),
+        listLawVersions(),
+        listComparisonRuns(),
+      ]);
+      setDocuments(documentItems);
+      setLawVersions(lawVersionItems);
+      setComparisonRuns(comparisonItems);
+      setSelectedDocumentId(documentItems[0]?.id ?? null);
+      setDocumentPreviewRefreshKey((current) => current + 1);
+      setAppNotice({
+        tone: "success",
+        label: "XLSX 가져오기 완료",
+        title: "XLSX 문서를 데이터베이스에 저장했습니다.",
+        detail: `${imports.length}개 시트를 문서로 등록했습니다. 내용 컬럼은 그대로 원문에 저장했습니다.`,
+        debug: [`imported sheets=${imports.length}`],
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "XLSX 가져오기 중 오류가 발생했습니다.";
+      setAppNotice({
+        tone: "danger",
+        label: "XLSX 가져오기 실패",
+        title: "XLSX 가져오기 중 오류가 발생했습니다.",
+        detail: message,
+        actions: ["시트에 장, 조, 항, 호, 목, 내용 컬럼이 있는지 확인하세요."],
+        debug: [`xlsx import error=${message}`],
+      });
+    }
+  }
+
+  async function refreshDocumentSummariesAfterSave() {
+    const documentItems = await listDocuments();
+    setDocuments(documentItems);
+    setSelectedDocumentId((current) =>
+      current && documentItems.some((item) => item.id === current) ? current : null,
+    );
+    setCheckedDocumentIds((current) =>
+      current.filter((id) => documentItems.some((item) => item.id === id)),
+    );
+    setComparisonTargetDocumentIds((current) =>
+      current.filter((id) => documentItems.some((item) => item.id === id)),
+    );
+    setComparisonReferenceDocumentIds((current) =>
+      current.filter((id) => documentItems.some((item) => item.id === id)),
+    );
+  }
+
+  async function handleDocumentSaved() {
+    try {
+      await refreshDocumentSummariesAfterSave();
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "문서 목록 새로고침 중 오류가 발생했습니다.";
       setAppNotice({
         tone: "warning",
-        label: "삭제 차단",
-        title: "확인 코드가 일치하지 않아 문서를 삭제하지 않았습니다.",
-        detail: "실수로 삭제되는 것을 막기 위해 코드가 일치할 때만 삭제를 진행합니다.",
-        actions: ["문서를 다시 삭제하려면 표시된 확인 코드를 정확히 입력하세요."],
-        debug: [`delete blocked document_id=${document.id}`],
+        label: "목록 갱신 실패",
+        title: "문서는 저장됐지만 문서 목록을 새로고침하지 못했습니다.",
+        detail: message,
+        actions: ["문서 내용은 저장되었습니다.", "필요하면 새로고침 후 목록 정보를 다시 확인하세요."],
+        debug: [`document summary refresh error=${message}`],
+      });
+    }
+  }
+
+  async function handleDeleteDocument(document: DocumentSummary) {
+    if (pendingDeleteDocumentId !== document.id) {
+      setPendingDeleteDocumentId(document.id);
+      setAppNotice({
+        tone: "warning",
+        label: "삭제 확인",
+        title: `"${document.title}" 문서를 삭제할까요?`,
+        detail: "삭제하려면 같은 문서의 삭제 버튼을 한 번 더 누르세요.",
+        actions: ["두 번째 클릭에서 실제 삭제가 진행됩니다.", "다른 문서를 누르면 확인 대상이 바뀝니다."],
+        debug: [`delete pending document_id=${document.id}`],
       });
       return;
     }
 
     setDeletingDocumentId(document.id);
+    setPendingDeleteDocumentId(null);
     setAppNotice({
       tone: "warning",
       label: "삭제 진행",
@@ -945,6 +1253,84 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
       });
     } finally {
       setReparsingDocumentId(null);
+    }
+  }
+
+  async function handleReparseAllDocuments(input: { automatic?: boolean } = {}) {
+    const targetDocuments = [...documents];
+    if (targetDocuments.length === 0) {
+      return;
+    }
+
+    setIsReparsingAllDocuments(true);
+    setAppNotice({
+      tone: "info",
+      label: input.automatic ? "문서 전체 재파싱" : "전체 재파싱",
+      title: input.automatic
+        ? "기존 문서에 최신 조문 파싱 규칙을 적용하는 중입니다..."
+        : "모든 문서를 최신 규칙으로 다시 파싱하는 중입니다...",
+      detail: `${targetDocuments.length}개 문서의 제N조의X 조문과 장·조·항·호·목 구조를 다시 계산합니다.`,
+      debug: [`bulk reparse count=${targetDocuments.length}`],
+    });
+
+    let completedCount = 0;
+    try {
+      for (const document of targetDocuments) {
+        setReparsingDocumentId(document.id);
+        await reparseDocument({ documentId: document.id });
+        completedCount += 1;
+      }
+
+      const [documentItems, comparisonItems] = await Promise.all([
+        listDocuments(),
+        listComparisonRuns(),
+      ]);
+      setDocuments(documentItems);
+      setComparisonRuns(comparisonItems);
+      setSelectedDocumentId((current) =>
+        current && documentItems.some((item) => item.id === current)
+          ? current
+          : (documentItems[0]?.id ?? null),
+      );
+      setCheckedDocumentIds((current) =>
+        current.filter((id) => documentItems.some((item) => item.id === id)),
+      );
+      setComparisonTargetDocumentIds((current) =>
+        current.filter((id) => documentItems.some((item) => item.id === id)),
+      );
+      setComparisonReferenceDocumentIds((current) =>
+        current.filter((id) => documentItems.some((item) => item.id === id)),
+      );
+      setSelectedComparisonRunId((current) =>
+        current && comparisonItems.some((item) => item.id === current) ? current : null,
+      );
+      setDocumentPreviewRefreshKey((current) => current + 1);
+      if (sessionUserId) {
+        writeDocumentParserReparseVersion(sessionUserId, DOCUMENT_PARSER_REPARSE_VERSION);
+      }
+      setAppNotice({
+        tone: "success",
+        label: "전체 재파싱 완료",
+        title: "모든 기존 문서에 최신 파싱 규칙을 적용했습니다.",
+        detail: `${completedCount}개 문서를 다시 파싱했습니다. 제7조의1 같은 조문은 조 컬럼에 들어갑니다.`,
+        debug: [`bulk reparse completed=${completedCount}`],
+      });
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "전체 문서 재파싱 중 오류가 발생했습니다.";
+      setAppNotice({
+        tone: "danger",
+        label: "전체 재파싱 실패",
+        title: "전체 문서 재파싱 중 오류가 발생했습니다.",
+        detail: `${completedCount}/${targetDocuments.length}개 처리 후 중단되었습니다. ${message}`,
+        debug: [`bulk reparse error=${message}`, `completed=${completedCount}`],
+      });
+    } finally {
+      setReparsingDocumentId(null);
+      setIsReparsingAllDocuments(false);
+      if (input.automatic && sessionUserId) {
+        writeDocumentParserReparseVersion(sessionUserId, DOCUMENT_PARSER_REPARSE_VERSION);
+      }
     }
   }
 
@@ -1641,7 +2027,7 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
                 {!showWorkspaceNavigation ? (
                   <section className="panel panel-equal-height workspace-body-card workspace-login-page">
                     <div className="workspace-login-layout">
-                      <AuthPanel session={session} />
+                      <AuthPanel session={session} allowedDomain={ALLOWED_EMAIL_DOMAIN} />
                     </div>
                   </section>
                 ) : null}
@@ -1829,8 +2215,45 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
                     <div className="workspace-documents-column">
                       <section className="panel workspace-body-card workspace-documents-panel">
                         <div className="section-header workspace-section-header">
-                          <h2>문서 목록</h2>
-                          <p>문서 목록에서 선택한 문서를 오른쪽에서 구조와 본문으로 바로 검토할 수 있습니다.</p>
+                          <div>
+                            <h2>문서 목록</h2>
+                            <p>문서 목록에서 선택한 문서를 오른쪽에서 구조와 본문으로 바로 검토할 수 있습니다.</p>
+                          </div>
+                          <div className="structured-editor-toolbar">
+                            <button
+                              type="button"
+                              className="button ghost structured-toolbar-button"
+                              onClick={() => {
+                                documentXlsxImportInputRef.current?.click();
+                              }}
+                              disabled={!session || !isSupabaseConfigured}
+                            >
+                              XLSX Import
+                            </button>
+                            <button
+                              type="button"
+                              className="button ghost structured-toolbar-button"
+                              onClick={() => {
+                                void handleExportDocumentsXlsx();
+                              }}
+                              disabled={documents.length === 0}
+                            >
+                              XLSX Export
+                            </button>
+                            <input
+                              ref={documentXlsxImportInputRef}
+                              type="file"
+                              accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                              className="visually-hidden"
+                              onChange={(event) => {
+                                const file = event.target.files?.[0];
+                                event.target.value = "";
+                                if (file) {
+                                  void handleImportDocumentsXlsx(file);
+                                }
+                              }}
+                            />
+                          </div>
                         </div>
                         <DocumentList
                           documents={documents}
@@ -1840,9 +2263,8 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
                           onDragDocumentStart={setDraggingDocumentId}
                           onDragDocumentEnd={() => setDraggingDocumentId(null)}
                           onDelete={handleDeleteDocument}
-                          onReparse={handleReparseDocument}
                           deletingDocumentId={deletingDocumentId}
-                          reparsingDocumentId={reparsingDocumentId}
+                          pendingDeleteDocumentId={pendingDeleteDocumentId}
                         />
                       </section>
                       <section className="panel workspace-documents-upload-panel">
@@ -1866,6 +2288,7 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
                       <DocumentViewer
                         documentId={selectedDocumentId}
                         refreshKey={documentPreviewRefreshKey}
+                        onDocumentSaved={handleDocumentSaved}
                       />
                     </section>
                   </div>
@@ -1938,9 +2361,6 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
                       referenceDocumentIds={comparisonReferenceDocumentIds}
                       selectedLawVersionIds={selectedLawVersionIds}
                       openAiSettings={openAiSettings}
-                      historyStorageKey={
-                        sessionUserId ? `policy-revision-mgmt-ai-analysis-history:${sessionUserId}` : undefined
-                      }
                       viewMode="results"
                       setStatus={setStatus}
                       onOverviewChange={setComparisonOverview}
@@ -2021,9 +2441,6 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
                         referenceDocumentIds={comparisonReferenceDocumentIds}
                         selectedLawVersionIds={selectedLawVersionIds}
                         openAiSettings={openAiSettings}
-                        historyStorageKey={
-                          sessionUserId ? `policy-revision-mgmt-ai-analysis-history:${sessionUserId}` : undefined
-                        }
                         viewMode="history"
                         setStatus={setStatus}
                         onOverviewChange={setComparisonOverview}
@@ -2046,9 +2463,6 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
                       referenceDocumentIds={comparisonReferenceDocumentIds}
                       selectedLawVersionIds={selectedLawVersionIds}
                       openAiSettings={openAiSettings}
-                      historyStorageKey={
-                        sessionUserId ? `policy-revision-mgmt-ai-analysis-history:${sessionUserId}` : undefined
-                      }
                       viewMode="history"
                       setStatus={setStatus}
                       onOverviewChange={setComparisonOverview}
@@ -2069,6 +2483,7 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
                       }}
                       openAiSettings={openAiSettings}
                       onOpenAiSettingChange={(field, value) => {
+                        openAiSettingsDirtyRef.current = true;
                         setOpenAiSettings((current) => ({
                           ...current,
                           [field]: value,
@@ -2137,59 +2552,6 @@ function inferNoticeActions(message: string) {
 
 function getWorkspaceSelectionStorageKey(userId: string) {
   return `policy-revision-mgmt-workspace-selection:${userId}`;
-}
-
-function getOpenAiSettingsStorageKey() {
-  return "policy-revision-mgmt-openai-settings";
-}
-
-function readOpenAiSettings(userId?: string | null): OpenAiSettings {
-  if (typeof window === "undefined") {
-    return {
-      apiKey: "",
-      model: DEFAULT_OPENAI_MODEL,
-    };
-  }
-
-  const raw =
-    window.localStorage.getItem(getOpenAiSettingsStorageKey()) ??
-    (userId ? window.localStorage.getItem(`policy-revision-mgmt-openai-settings:${userId}`) : null);
-  if (!raw) {
-    return {
-      apiKey: "",
-      model: DEFAULT_OPENAI_MODEL,
-    };
-  }
-
-  try {
-    const parsed = JSON.parse(raw) as Partial<OpenAiSettings>;
-    return {
-      apiKey: typeof parsed.apiKey === "string" ? parsed.apiKey : "",
-      model:
-        typeof parsed.model === "string" && parsed.model.trim()
-          ? parsed.model
-          : DEFAULT_OPENAI_MODEL,
-    };
-  } catch {
-    return {
-      apiKey: "",
-      model: DEFAULT_OPENAI_MODEL,
-    };
-  }
-}
-
-function writeOpenAiSettings(settings: OpenAiSettings) {
-  if (typeof window === "undefined") {
-    return;
-  }
-
-  window.localStorage.setItem(
-    getOpenAiSettingsStorageKey(),
-    JSON.stringify({
-      apiKey: settings.apiKey,
-      model: settings.model.trim() || DEFAULT_OPENAI_MODEL,
-    }),
-  );
 }
 
 function updatePromptSlot(slots: PromptSlotList, index: number, value: string): PromptSlotList {
@@ -2268,6 +2630,45 @@ function writeWorkspaceSelection(userId: string, selection: PersistedWorkspaceSe
     getWorkspaceSelectionStorageKey(userId),
     JSON.stringify(selection),
   );
+}
+
+function readWorkspaceSection(): WorkspaceSection | null {
+  if (typeof window === "undefined") {
+    return null;
+  }
+
+  const raw = window.localStorage.getItem(WORKSPACE_SECTION_STORAGE_KEY);
+  return WORKSPACE_SECTIONS.includes(raw as WorkspaceSection)
+    ? (raw as WorkspaceSection)
+    : null;
+}
+
+function writeWorkspaceSection(section: WorkspaceSection) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  window.localStorage.setItem(WORKSPACE_SECTION_STORAGE_KEY, section);
+}
+
+function getDocumentParserReparseStorageKey(userId: string) {
+  return `policy-revision-mgmt-document-parser-reparse:${userId}`;
+}
+
+function readDocumentParserReparseVersion(userId: string) {
+  if (typeof window === "undefined") {
+    return null;
+  }
+
+  return window.localStorage.getItem(getDocumentParserReparseStorageKey(userId));
+}
+
+function writeDocumentParserReparseVersion(userId: string, version: string) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  window.localStorage.setItem(getDocumentParserReparseStorageKey(userId), version);
 }
 
 function filterExistingIds<T extends { id: string }>(ids: string[], items: T[]) {
@@ -2550,6 +2951,172 @@ function getUploadDisabledReason(session: Session | null, isSupabaseConfigured: 
   return null;
 }
 
+function buildXlsxContentRows(row: {
+  행번호: number;
+  문서명: string;
+  장: string;
+  조: string;
+  항: string;
+  호: string;
+  목: string;
+  내용: string;
+}) {
+  const chunks = splitTextForXlsxCell(row.내용);
+  return chunks.map((chunk, index) => ({
+    문서명: row.문서명,
+    행번호: row.행번호,
+    분할번호: index + 1,
+    장: row.장,
+    조: row.조,
+    항: row.항,
+    호: row.호,
+    목: row.목,
+    내용: chunk,
+  }));
+}
+
+function buildImportedXlsxRows(rows: Array<Record<string, unknown>>) {
+  const rowGroups = new Map<number, {
+    order: number;
+    chapterLabel: string;
+    articleLabel: string;
+    paragraphLabel: string;
+    itemLabel: string;
+    subItemLabel: string;
+    chunks: Array<{ part: number; content: string }>;
+  }>();
+
+  rows.forEach((row, index) => {
+    const rowNumber = parsePositiveInteger(row["행번호"]) ?? index + 1;
+    const partNumber = parsePositiveInteger(row["분할번호"]) ?? 1;
+    const current = rowGroups.get(rowNumber) ?? {
+      order: index,
+      chapterLabel: String(row["장"] ?? ""),
+      articleLabel: String(row["조"] ?? ""),
+      paragraphLabel: String(row["항"] ?? ""),
+      itemLabel: String(row["호"] ?? ""),
+      subItemLabel: String(row["목"] ?? ""),
+      chunks: [],
+    };
+
+    current.chapterLabel ||= String(row["장"] ?? "");
+    current.articleLabel ||= String(row["조"] ?? "");
+    current.paragraphLabel ||= String(row["항"] ?? "");
+    current.itemLabel ||= String(row["호"] ?? "");
+    current.subItemLabel ||= String(row["목"] ?? "");
+    current.chunks.push({
+      part: partNumber,
+      content: String(row["내용"] ?? ""),
+    });
+    rowGroups.set(rowNumber, current);
+  });
+
+  return [...rowGroups.entries()]
+    .sort((left, right) => left[1].order - right[1].order || left[0] - right[0])
+    .map(([, group]) => ({
+      chapterLabel: group.chapterLabel,
+      articleLabel: group.articleLabel,
+      paragraphLabel: group.paragraphLabel,
+      itemLabel: group.itemLabel,
+      subItemLabel: group.subItemLabel,
+      content: group.chunks
+        .sort((left, right) => left.part - right.part)
+        .map((chunk) => chunk.content)
+        .join(""),
+    }))
+    .filter((row) => row.content.length > 0);
+}
+
+function splitTextForXlsxCell(value: string) {
+  const maxLength = 30000;
+  if (value.length <= maxLength) {
+    return [value];
+  }
+
+  const chunks: string[] = [];
+  for (let start = 0; start < value.length; start += maxLength) {
+    chunks.push(value.slice(start, start + maxLength));
+  }
+  return chunks;
+}
+
+function parsePositiveInteger(value: unknown) {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+function buildUniqueXlsxSheetName(value: string, usedNames: Set<string>) {
+  const baseName = buildXlsxSheetName(value);
+  let candidate = baseName;
+  let index = 2;
+  while (usedNames.has(candidate)) {
+    const suffix = `-${index}`;
+    candidate = `${baseName.slice(0, 31 - suffix.length)}${suffix}`;
+    index += 1;
+  }
+  usedNames.add(candidate);
+  return candidate;
+}
+
+function readXlsxDocumentTitleMap(workbook: XLSX.WorkBook) {
+  const worksheet = workbook.Sheets["문서 목록"];
+  const titleBySheetName = new Map<string, string>();
+  if (!worksheet) {
+    return titleBySheetName;
+  }
+
+  const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(worksheet, { defval: "" });
+  for (const row of rows) {
+    const sheetName = String(row["시트명"] ?? "").trim();
+    const documentTitle = String(row["문서명"] ?? "").trim();
+    if (sheetName && documentTitle) {
+      titleBySheetName.set(sheetName, documentTitle);
+    }
+  }
+
+  return titleBySheetName;
+}
+
+function buildXlsxSheetName(value: string) {
+  const sanitized = value
+    .replace(/[\[\]:*?/\\]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return (sanitized || "문서").slice(0, 31);
+}
+
+function downloadWorkbookXlsx(workbook: XLSX.WorkBook, fileName: string) {
+  const data = XLSX.write(workbook, { bookType: "xlsx", type: "array" });
+  const blob = new Blob([data], {
+    type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  });
+  const url = window.URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = fileName;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.URL.revokeObjectURL(url);
+}
+
+function sanitizeFileName(value: string) {
+  return value
+    .replace(/[^\w.-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "")
+    || "document";
+}
+
+function formatDateStamp(date: Date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  const hour = String(date.getHours()).padStart(2, "0");
+  const minute = String(date.getMinutes()).padStart(2, "0");
+  return `${year}${month}${day}-${hour}${minute}`;
+}
+
 function getComparisonDisabledReason(session: Session | null, isSupabaseConfigured: boolean) {
   if (!isSupabaseConfigured) {
     return "Supabase 환경 변수가 없어 비교 기능이 잠겨 있습니다.";
@@ -2571,21 +3138,4 @@ function runComparisonStageWithTimeout<T>(label: string, promise: Promise<T>) {
       }, APP_STAGE_REQUEST_TIMEOUT_MS);
     }),
   ]);
-}
-
-function createDeleteConfirmationCode() {
-  return Math.random().toString(36).slice(2, 8).toUpperCase();
-}
-
-async function copyTextToClipboard(value: string) {
-  if (!navigator.clipboard?.writeText) {
-    return false;
-  }
-
-  try {
-    await navigator.clipboard.writeText(value);
-    return true;
-  } catch {
-    return false;
-  }
 }

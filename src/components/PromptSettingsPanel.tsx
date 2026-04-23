@@ -118,7 +118,7 @@ export function PromptSettingsPanel(input: PromptSettingsPanelProps) {
             />
           </label>
           <p className="helper-text">
-            키는 현재 브라우저 로컬 저장소에만 저장되며, 비교 요청 시 Edge Function으로 전달됩니다.
+            입력한 키와 모델은 로그인한 사용자 기준으로 저장되며, 비교 요청 시 Edge Function으로 전달됩니다.
           </p>
         </div>
       </section>

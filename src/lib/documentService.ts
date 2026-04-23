@@ -8,6 +8,7 @@ import type {
   AiRevisionGuidance,
   AiRevisionStageResult,
   AiRevisionPromptOverrides,
+  AiReportHistoryEntry,
   PromptSlotList,
   AggregatedComparisonResultRecord,
   AiRevisionAnalysisStage,
@@ -17,6 +18,7 @@ import type {
   ComparisonRunSummary,
   DocumentDetail,
   DocumentSummary,
+  HierarchyType,
   LawDetail,
   LawVersionSummary,
   OpenAiSettings,
@@ -24,8 +26,10 @@ import type {
   WorkspaceFavorite,
   WorkspaceSelectionSnapshot,
 } from "../types";
-import { parsePolicyText } from "../../shared/policyParser";
+import { parsePolicyText, type ParsedSection } from "../../shared/policyParser";
 import { buildSectionHierarchyColumns } from "../../shared/sectionHierarchyColumns";
+
+const STRUCTURED_XLSX_IMPORT_WARNING = "STRUCTURED_XLSX_IMPORT_LOCKED";
 
 interface ComparisonRunMetaRow {
   id: string;
@@ -51,6 +55,11 @@ interface WorkspaceFavoriteRow {
   law_version_ids: string[] | null;
 }
 
+interface PolicyUserSettingsRow {
+  openai_api_key: string | null;
+  openai_model: string | null;
+}
+
 interface ReviewExecutionHistoryRow {
   id: string;
   reviewer_email: string;
@@ -59,6 +68,24 @@ interface ReviewExecutionHistoryRow {
   comparison_run_ids: string[] | null;
   result_status: ReviewExecutionHistoryEntry["resultStatus"] | null;
   created_at: string;
+}
+
+interface AiReportHistoryRow {
+  id: string;
+  title: string;
+  selection_summary: string;
+  selection_counts: unknown;
+  guidance: unknown;
+  created_at: string;
+}
+
+export interface ImportedStructuredDocumentRow {
+  chapterLabel: string;
+  articleLabel: string;
+  paragraphLabel: string;
+  itemLabel: string;
+  subItemLabel: string;
+  content: string;
 }
 
 export async function uploadDocument(input: {
@@ -124,8 +151,9 @@ export async function uploadDocument(input: {
       throw new Error(buildAuthDebugMessage(`document version insert failed: ${versionError?.message ?? "unknown"}`, session));
     }
 
-    const hierarchyColumnsById = buildSectionHierarchyColumns(parseResult.sections);
-    const rows = await Promise.all(parseResult.sections.map(async (section) => ({
+    const sections = dedupeParsedSections(parseResult.sections);
+    const hierarchyColumnsById = buildSectionHierarchyColumns(sections);
+    const rows = await Promise.all(sections.map(async (section) => ({
       id: section.tempId,
       document_version_id: version.id,
       parent_section_id: section.parentTempId,
@@ -138,6 +166,9 @@ export async function uploadDocument(input: {
       path_display: section.path.join(" > "),
       ...hierarchyColumnsById.get(section.tempId),
     })));
+    if (rows.length === 0 && fileText.trim()) {
+      rows.push(await buildFallbackDocumentSectionRow(version.id, fileText));
+    }
 
     if (rows.length > 0) {
       const { error: sectionError } = await supabase
@@ -149,6 +180,13 @@ export async function uploadDocument(input: {
       }
     }
 
+    const supersededDocumentCount = await deleteSupersededDocumentsByTitle({
+      currentDocumentId: document.id,
+      ownerUserId: currentUser.id,
+      title: input.title,
+      session,
+    });
+
     await supabase.from("policy_audit_logs").insert({
       actor_user_id: currentUser.id,
       action: "DOCUMENT_REGISTERED",
@@ -158,6 +196,7 @@ export async function uploadDocument(input: {
         versionId: version.id,
         sectionCount: rows.length,
         warningCount: parseResult.warnings.length,
+        supersededDocumentCount,
       },
     });
 
@@ -168,6 +207,7 @@ export async function uploadDocument(input: {
         versionId: version.id,
         sectionCount: rows.length,
         warnings: parseResult.warnings,
+        supersededDocumentCount,
       },
     };
   } catch (error) {
@@ -179,17 +219,420 @@ export async function uploadDocument(input: {
   }
 }
 
+export async function uploadRawTextDocument(input: {
+  rawText: string;
+  title: string;
+  description: string;
+  sourceFileName: string;
+}) {
+  const session = await ensureAuthenticatedSession();
+  const currentUser = await ensureAuthenticatedUser(session.access_token);
+  const supabase = getSupabaseClient();
+  const storagePath = buildClientStoragePath(currentUser.id, input.sourceFileName);
+  const fileBytes = new TextEncoder().encode(input.rawText);
+  const { error: uploadError } = await supabase.storage
+    .from("source-documents")
+    .upload(storagePath, fileBytes, {
+      upsert: false,
+      contentType: "text/plain",
+    });
+
+  if (uploadError) {
+    throw new Error(buildAuthDebugMessage(`document import storage failed: ${uploadError.message}`, session));
+  }
+
+  const parseResult = parsePolicyText(input.rawText);
+  const inferredDocumentType = inferClientDocumentType({
+    inputTitle: input.title,
+    parsedTitle: parseResult.metadata.title,
+    rawText: input.rawText,
+  });
+
+  const { data: document, error: documentError } = await supabase
+    .from("policy_documents")
+    .insert({
+      owner_user_id: currentUser.id,
+      title: input.title,
+      description: input.description || null,
+      document_type: inferredDocumentType,
+      source_storage_path: storagePath,
+      source_file_name: input.sourceFileName,
+    })
+    .select("id")
+    .single();
+
+  if (documentError || !document) {
+    throw new Error(buildAuthDebugMessage(`document import insert failed: ${documentError?.message ?? "unknown"}`, session));
+  }
+
+  const { data: version, error: versionError } = await supabase
+    .from("policy_document_versions")
+    .insert({
+      document_id: document.id,
+      version_number: 1,
+      raw_text: input.rawText,
+      parse_warnings: parseResult.warnings,
+    })
+    .select("id, raw_text")
+    .single();
+
+  if (versionError || !version) {
+    throw new Error(buildAuthDebugMessage(`document import version insert failed: ${versionError?.message ?? "unknown"}`, session));
+  }
+
+  if ((version.raw_text ?? "") !== input.rawText) {
+    throw new Error(buildAuthDebugMessage("document import verification failed: imported raw text changed during save.", session));
+  }
+
+  const sections = dedupeParsedSections(parseResult.sections);
+  const hierarchyColumnsById = buildSectionHierarchyColumns(sections);
+  const rows = await Promise.all(sections.map(async (section) => ({
+    id: section.tempId,
+    document_version_id: version.id,
+    parent_section_id: section.parentTempId,
+    hierarchy_type: section.hierarchyType,
+    hierarchy_label: section.hierarchyLabel,
+    hierarchy_order: section.hierarchyOrder,
+    normalized_text: section.normalizedText,
+    original_text: section.originalText,
+    text_hash: await sha256Hex(section.normalizedText),
+    path_display: section.path.join(" > "),
+    ...hierarchyColumnsById.get(section.tempId),
+  })));
+  if (rows.length === 0 && input.rawText.trim()) {
+    rows.push(await buildFallbackDocumentSectionRow(version.id, input.rawText));
+  }
+
+  if (rows.length > 0) {
+    const { error: sectionError } = await supabase
+      .from("policy_document_sections")
+      .insert(rows);
+
+    if (sectionError) {
+      throw new Error(buildAuthDebugMessage(`document import section insert failed: ${sectionError.message}`, session));
+    }
+  }
+
+  const supersededDocumentCount = await deleteSupersededDocumentsByTitle({
+    currentDocumentId: document.id,
+    ownerUserId: currentUser.id,
+    title: input.title,
+    session,
+  });
+
+  await supabase.from("policy_audit_logs").insert({
+    actor_user_id: currentUser.id,
+    action: "DOCUMENT_REGISTERED",
+    target_document_id: document.id,
+    result: "SUCCESS",
+    metadata: {
+      versionId: version.id,
+      sectionCount: rows.length,
+      warningCount: parseResult.warnings.length,
+      supersededDocumentCount,
+      source: "xlsx-import",
+    },
+  });
+
+  return {
+    status: "success",
+    data: {
+      documentId: document.id,
+      versionId: version.id,
+      sectionCount: rows.length,
+      warnings: parseResult.warnings,
+      supersededDocumentCount,
+    },
+  };
+}
+
+export async function uploadStructuredRowsDocument(input: {
+  rows: ImportedStructuredDocumentRow[];
+  title: string;
+  description: string;
+  sourceFileName: string;
+}) {
+  const session = await ensureAuthenticatedSession();
+  const currentUser = await ensureAuthenticatedUser(session.access_token);
+  const supabase = getSupabaseClient();
+  const rawText = input.rows.map((row) => row.content).join("\n");
+  const storagePath = buildClientStoragePath(currentUser.id, input.sourceFileName);
+  const fileBytes = new TextEncoder().encode(rawText);
+  const { error: uploadError } = await supabase.storage
+    .from("source-documents")
+    .upload(storagePath, fileBytes, {
+      upsert: false,
+      contentType: "text/plain",
+    });
+
+  if (uploadError) {
+    throw new Error(buildAuthDebugMessage(`structured import storage failed: ${uploadError.message}`, session));
+  }
+
+  const inferredDocumentType = inferClientDocumentType({
+    inputTitle: input.title,
+    parsedTitle: null,
+    rawText,
+  });
+
+  const { data: document, error: documentError } = await supabase
+    .from("policy_documents")
+    .insert({
+      owner_user_id: currentUser.id,
+      title: input.title,
+      description: input.description || null,
+      document_type: inferredDocumentType,
+      source_storage_path: storagePath,
+      source_file_name: input.sourceFileName,
+    })
+    .select("id")
+    .single();
+
+  if (documentError || !document) {
+    throw new Error(buildAuthDebugMessage(`structured import document insert failed: ${documentError?.message ?? "unknown"}`, session));
+  }
+
+  const { data: version, error: versionError } = await supabase
+    .from("policy_document_versions")
+    .insert({
+      document_id: document.id,
+      version_number: 1,
+      raw_text: rawText,
+      parse_warnings: [STRUCTURED_XLSX_IMPORT_WARNING],
+    })
+    .select("id, raw_text")
+    .single();
+
+  if (versionError || !version) {
+    throw new Error(buildAuthDebugMessage(`structured import version insert failed: ${versionError?.message ?? "unknown"}`, session));
+  }
+
+  if ((version.raw_text ?? "") !== rawText) {
+    throw new Error(buildAuthDebugMessage("structured import verification failed: imported text changed during save.", session));
+  }
+
+  const sectionRows = await buildImportedDocumentSectionRows(version.id, input.rows);
+  if (sectionRows.length === 0 && rawText.trim()) {
+    sectionRows.push(await buildFallbackDocumentSectionRow(version.id, rawText));
+  }
+
+  if (sectionRows.length > 0) {
+    const { error: sectionError } = await supabase
+      .from("policy_document_sections")
+      .insert(sectionRows);
+
+    if (sectionError) {
+      throw new Error(buildAuthDebugMessage(`structured import section insert failed: ${sectionError.message}`, session));
+    }
+  }
+
+  const supersededDocumentCount = await deleteSupersededDocumentsByTitle({
+    currentDocumentId: document.id,
+    ownerUserId: currentUser.id,
+    title: input.title,
+    session,
+  });
+
+  await supabase.from("policy_audit_logs").insert({
+    actor_user_id: currentUser.id,
+    action: "DOCUMENT_REGISTERED",
+    target_document_id: document.id,
+    result: "SUCCESS",
+    metadata: {
+      versionId: version.id,
+      sectionCount: sectionRows.length,
+      warningCount: 0,
+      supersededDocumentCount,
+      source: "xlsx-structured-import",
+    },
+  });
+
+  return {
+    status: "success",
+    data: {
+      documentId: document.id,
+      versionId: version.id,
+      sectionCount: sectionRows.length,
+      warnings: [],
+      supersededDocumentCount,
+    },
+  };
+}
+
+async function buildImportedDocumentSectionRows(
+  versionId: string,
+  rows: ImportedStructuredDocumentRow[],
+) {
+  const sectionRows = await Promise.all(rows
+    .map((row, index) => ({
+      ...row,
+      content: row.content,
+      order: index + 1,
+    }))
+    .filter((row) => row.content.length > 0)
+    .map(async (row) => {
+      const hierarchy = getImportedRowHierarchy(row);
+      const pathDisplay = [
+        row.chapterLabel,
+        row.articleLabel,
+        row.paragraphLabel,
+        row.itemLabel,
+        row.subItemLabel,
+      ].map((value) => value.trim()).filter(Boolean).join(" > ");
+
+      return {
+        id: crypto.randomUUID(),
+        document_version_id: versionId,
+        parent_section_id: null,
+        hierarchy_type: hierarchy.type,
+        hierarchy_label: hierarchy.label,
+        hierarchy_order: row.order,
+        normalized_text: normalizeSectionText(row.content),
+        original_text: row.content,
+        text_hash: await sha256Hex(normalizeSectionText(row.content)),
+        path_display: pathDisplay,
+        chapter_label: nullableTrim(row.chapterLabel),
+        chapter_text: hierarchy.type === "chapter" ? row.content : null,
+        article_label: nullableTrim(row.articleLabel),
+        article_text: hierarchy.type === "article" ? row.content : null,
+        paragraph_label: nullableTrim(row.paragraphLabel),
+        paragraph_text: hierarchy.type === "paragraph" ? row.content : null,
+        item_label: nullableTrim(row.itemLabel),
+        item_text: hierarchy.type === "item" ? row.content : null,
+        sub_item_label: nullableTrim(row.subItemLabel),
+        sub_item_text: hierarchy.type === "sub_item" ? row.content : null,
+      };
+    }));
+
+  return sectionRows;
+}
+
+function getImportedRowHierarchy(row: ImportedStructuredDocumentRow): {
+  type: HierarchyType;
+  label: string;
+} {
+  const candidates: Array<{ type: HierarchyType; label: string }> = [
+    { type: "sub_item", label: row.subItemLabel },
+    { type: "item", label: row.itemLabel },
+    { type: "paragraph", label: row.paragraphLabel },
+    { type: "article", label: row.articleLabel },
+    { type: "chapter", label: row.chapterLabel },
+  ];
+  const deepest = candidates.find((candidate) => candidate.label.trim());
+  return deepest ?? { type: "document", label: "문서" };
+}
+
+async function buildFallbackDocumentSectionRow(versionId: string, rawText: string) {
+  const normalizedText = normalizeSectionText(rawText);
+  return {
+    id: crypto.randomUUID(),
+    document_version_id: versionId,
+    parent_section_id: null,
+    hierarchy_type: "document" as const,
+    hierarchy_label: "문서",
+    hierarchy_order: 1,
+    normalized_text: normalizedText,
+    original_text: rawText,
+    text_hash: await sha256Hex(normalizedText),
+    path_display: "문서",
+    chapter_label: null,
+    chapter_text: null,
+    article_label: null,
+    article_text: null,
+    paragraph_label: null,
+    paragraph_text: null,
+    item_label: null,
+    item_text: null,
+    sub_item_label: null,
+    sub_item_text: null,
+  };
+}
+
+function normalizeSectionText(value: string) {
+  return value.replace(/\s+/gu, " ").trim();
+}
+
+function nullableTrim(value: string) {
+  const trimmed = value.trim();
+  return trimmed || null;
+}
+
+async function deleteSupersededDocumentsByTitle(input: {
+  currentDocumentId: string;
+  ownerUserId: string;
+  title: string;
+  session: Awaited<ReturnType<typeof ensureAuthenticatedSession>>;
+}) {
+  const normalizedTitle = input.title.trim();
+  if (!normalizedTitle) {
+    return 0;
+  }
+
+  const supabase = getSupabaseClient();
+  const { data: supersededDocuments, error: loadError } = await supabase
+    .from("policy_documents")
+    .select("id, source_storage_path")
+    .eq("owner_user_id", input.ownerUserId)
+    .eq("title", normalizedTitle)
+    .neq("id", input.currentDocumentId);
+
+  if (loadError) {
+    throw new Error(buildAuthDebugMessage(`superseded document lookup failed: ${loadError.message}`, input.session));
+  }
+
+  const supersededIds = (supersededDocuments ?? []).map((document) => document.id);
+  if (supersededIds.length === 0) {
+    return 0;
+  }
+
+  const storagePaths = (supersededDocuments ?? [])
+    .map((document) => document.source_storage_path)
+    .filter((path): path is string => typeof path === "string" && path.trim().length > 0);
+
+  if (storagePaths.length > 0) {
+    const { error: storageError } = await supabase.storage
+      .from("source-documents")
+      .remove(storagePaths);
+
+    if (storageError) {
+      throw new Error(buildAuthDebugMessage(`superseded document storage delete failed: ${storageError.message}`, input.session));
+    }
+  }
+
+  const { error: deleteError } = await supabase
+    .from("policy_documents")
+    .delete()
+    .in("id", supersededIds);
+
+  if (deleteError) {
+    throw new Error(buildAuthDebugMessage(`superseded document delete failed: ${deleteError.message}`, input.session));
+  }
+
+  return supersededIds.length;
+}
+
 export async function deleteDocument(input: { documentId: string }) {
   const session = await ensureAuthenticatedSession();
   const currentUser = await ensureAuthenticatedUser(session.access_token);
   const supabase = getSupabaseClient();
-  const { error } = await supabase
+  const { data: deletedDocument, error } = await supabase
     .from("policy_documents")
     .delete()
-    .eq("id", input.documentId);
+    .eq("id", input.documentId)
+    .select("id")
+    .maybeSingle();
 
   if (error) {
     throw new Error(buildAuthDebugMessage(`delete-document direct delete failed: ${error.message}`, session));
+  }
+
+  if (!deletedDocument) {
+    throw new Error(
+      buildAuthDebugMessage(
+        "delete-document direct delete failed: 삭제된 문서가 없습니다. 이 문서의 소유자가 아니거나 삭제 권한이 없을 수 있습니다.",
+        session,
+      ),
+    );
   }
 
   return {
@@ -207,7 +650,7 @@ export async function reparseDocument(input: { documentId: string }) {
   const supabase = getSupabaseClient();
   const { data: version, error: versionError } = await supabase
     .from("policy_document_versions")
-    .select("id, raw_text, version_number, created_at")
+    .select("id, raw_text, version_number, created_at, parse_warnings")
     .eq("document_id", input.documentId)
     .order("version_number", { ascending: false })
     .order("created_at", { ascending: false })
@@ -218,9 +661,23 @@ export async function reparseDocument(input: { documentId: string }) {
     throw new Error(buildAuthDebugMessage(`reparse-document load failed: ${versionError?.message ?? "Latest version not found."}`, session));
   }
 
+  if (Array.isArray(version.parse_warnings) && version.parse_warnings.includes(STRUCTURED_XLSX_IMPORT_WARNING)) {
+    return {
+      status: "success",
+      data: {
+        documentId: input.documentId,
+        versionId: version.id,
+        sectionCount: 0,
+        warningCount: version.parse_warnings.length,
+        reparsedBy: currentUser.id,
+      },
+    };
+  }
+
   const parseResult = parsePolicyText(version.raw_text ?? "");
-  const hierarchyColumnsById = buildSectionHierarchyColumns(parseResult.sections);
-  const rows = await Promise.all(parseResult.sections.map(async (section) => ({
+  const sections = dedupeParsedSections(parseResult.sections);
+  const hierarchyColumnsById = buildSectionHierarchyColumns(sections);
+  const rows = await Promise.all(sections.map(async (section) => ({
     id: section.tempId,
     document_version_id: version.id,
     parent_section_id: section.parentTempId,
@@ -233,6 +690,9 @@ export async function reparseDocument(input: { documentId: string }) {
     path_display: section.path.join(" > "),
     ...hierarchyColumnsById.get(section.tempId),
   })));
+  if (rows.length === 0 && (version.raw_text ?? "").trim()) {
+    rows.push(await buildFallbackDocumentSectionRow(version.id, version.raw_text ?? ""));
+  }
 
   const { error: deleteSectionsError } = await supabase
     .from("policy_document_sections")
@@ -306,7 +766,21 @@ export async function listDocuments(): Promise<DocumentSummary[]> {
       effective_date: metadata.revisionDate,
       section_count: latestVersion?.policy_document_sections?.[0]?.count ?? 0,
     };
-  });
+  }).sort(compareDocumentSummaryForList);
+}
+
+function compareDocumentSummaryForList(left: DocumentSummary, right: DocumentSummary) {
+  const priorityDiff = getDocumentListPriority(left) - getDocumentListPriority(right);
+  if (priorityDiff !== 0) {
+    return priorityDiff;
+  }
+
+  return new Date(right.created_at).getTime() - new Date(left.created_at).getTime();
+}
+
+function getDocumentListPriority(document: Pick<DocumentSummary, "title">) {
+  const title = document.title.trim();
+  return title.endsWith("정책") || title.endsWith("지침") ? 1 : 0;
 }
 
 export async function listWorkspaceFavorites(): Promise<WorkspaceFavorite[]> {
@@ -430,6 +904,69 @@ export async function updateReviewExecutionHistoryStatus(input: {
   } satisfies ReviewExecutionHistoryEntry;
 }
 
+export async function listAiReportHistory(): Promise<AiReportHistoryEntry[]> {
+  await ensureAuthenticatedSession();
+  const supabase = getSupabaseClient();
+  const { data, error } = await supabase
+    .from("policy_ai_report_history")
+    .select("id, title, selection_summary, selection_counts, guidance, created_at")
+    .order("created_at", { ascending: false });
+
+  if (error) {
+    throwAuthAwareError(error.message);
+  }
+
+  return ((data ?? []) as AiReportHistoryRow[]).flatMap((row) => {
+    const entry = normalizeAiReportHistoryRow(row);
+    return entry ? [entry] : [];
+  });
+}
+
+export async function saveAiReportHistoryEntry(input: {
+  title: string;
+  selectionSummary: string;
+  selectionCounts: AiReportHistoryEntry["selectionCounts"];
+  guidance: AiReportHistoryEntry["guidance"];
+}) {
+  const session = await ensureAuthenticatedSession();
+  const currentUser = await ensureAuthenticatedUser(session.access_token);
+  const supabase = getSupabaseClient();
+  const { data, error } = await supabase
+    .from("policy_ai_report_history")
+    .insert({
+      owner_user_id: currentUser.id,
+      title: input.title,
+      selection_summary: input.selectionSummary,
+      selection_counts: input.selectionCounts,
+      guidance: input.guidance,
+    })
+    .select("id, title, selection_summary, selection_counts, guidance, created_at")
+    .single();
+
+  if (error || !data) {
+    throw new Error(buildAuthDebugMessage(`ai report history save failed: ${error?.message ?? "unknown"}`, session));
+  }
+
+  const normalized = normalizeAiReportHistoryRow(data as AiReportHistoryRow);
+  if (!normalized) {
+    throw new Error(buildAuthDebugMessage("ai report history save failed: invalid saved payload.", session));
+  }
+  return normalized;
+}
+
+export async function deleteAiReportHistoryEntry(entryId: string) {
+  await ensureAuthenticatedSession();
+  const supabase = getSupabaseClient();
+  const { error } = await supabase
+    .from("policy_ai_report_history")
+    .delete()
+    .eq("id", entryId);
+
+  if (error) {
+    throwAuthAwareError(error.message);
+  }
+}
+
 export async function saveWorkspaceFavorite(input: {
   favoriteId?: string;
   name: string;
@@ -496,20 +1033,59 @@ export async function deleteWorkspaceFavorite(favoriteId: string) {
   }
 }
 
+export async function getPolicyUserOpenAiSettings(defaultModel: string): Promise<OpenAiSettings> {
+  const session = await ensureAuthenticatedSession();
+  const currentUser = await ensureAuthenticatedUser(session.access_token);
+  const supabase = getSupabaseClient();
+  const { data, error } = await supabase
+    .from("policy_user_settings")
+    .select("openai_api_key, openai_model")
+    .eq("owner_user_id", currentUser.id)
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(buildAuthDebugMessage(`openai settings load failed: ${error.message}`, session));
+  }
+
+  const row = (data ?? null) as PolicyUserSettingsRow | null;
+  return {
+    apiKey: row?.openai_api_key ?? "",
+    model: row?.openai_model?.trim() || defaultModel,
+  };
+}
+
+export async function savePolicyUserOpenAiSettings(settings: OpenAiSettings, defaultModel: string) {
+  const session = await ensureAuthenticatedSession();
+  const currentUser = await ensureAuthenticatedUser(session.access_token);
+  const supabase = getSupabaseClient();
+  const { error } = await supabase
+    .from("policy_user_settings")
+    .upsert({
+      owner_user_id: currentUser.id,
+      openai_api_key: settings.apiKey,
+      openai_model: settings.model.trim() || defaultModel,
+      updated_at: new Date().toISOString(),
+    }, { onConflict: "owner_user_id" });
+
+  if (error) {
+    throw new Error(buildAuthDebugMessage(`openai settings save failed: ${error.message}`, session));
+  }
+}
+
 export async function getDocumentDetail(
   documentId: string,
 ): Promise<DocumentDetail> {
   await ensureAuthenticatedSession();
   const supabase = getSupabaseClient();
-  const [detailResponse, versionResponse] = await Promise.all([
+  const [documentResponse, versionResponse] = await Promise.all([
     supabase
-      .from("policy_document_details")
-      .select("*")
+      .from("policy_documents")
+      .select("id, title, description, document_type")
       .eq("id", documentId)
       .single(),
     supabase
       .from("policy_document_versions")
-      .select("id")
+      .select("id, version_number, raw_text, parse_warnings")
       .eq("document_id", documentId)
       .order("version_number", { ascending: false })
       .order("created_at", { ascending: false })
@@ -517,28 +1093,113 @@ export async function getDocumentDetail(
       .single(),
   ]);
 
-  if (detailResponse.error) {
-    throwAuthAwareError(detailResponse.error.message);
+  if (documentResponse.error) {
+    throwAuthAwareError(documentResponse.error.message);
   }
 
-  if (versionResponse.error) {
+  if (versionResponse.error || !versionResponse.data) {
     throwAuthAwareError(versionResponse.error.message);
   }
 
-  const data = detailResponse.data;
-  const metadata = deriveDocumentMetadata(data.raw_text);
+  let sections = await fetchAllDocumentSections(versionResponse.data.id);
+  const parseWarnings = Array.isArray(versionResponse.data.parse_warnings)
+    ? versionResponse.data.parse_warnings.filter((value: unknown): value is string => typeof value === "string")
+    : [];
+  const isStructuredImportLocked = parseWarnings.includes(STRUCTURED_XLSX_IMPORT_WARNING);
+  if (sections.length === 0 && (versionResponse.data.raw_text ?? "").trim() && !isStructuredImportLocked) {
+    sections = await rebuildMissingDocumentSections(
+      versionResponse.data.id,
+      versionResponse.data.raw_text,
+    );
+  }
+  const metadata = deriveDocumentMetadata(versionResponse.data.raw_text);
 
   return {
-    ...data,
-    version_id: versionResponse.data?.id ?? undefined,
+    id: documentResponse.data.id,
+    version_id: versionResponse.data.id,
+    title: documentResponse.data.title,
+    description: documentResponse.data.description,
+    document_type: documentResponse.data.document_type,
+    version_number: versionResponse.data.version_number,
+    raw_text: versionResponse.data.raw_text,
+    sections: dedupeDocumentSectionRecords(
+      sections,
+    ),
     parse_warnings: filterDocumentParseWarnings(
-      Array.isArray(data.parse_warnings)
-        ? data.parse_warnings.filter((value: unknown): value is string => typeof value === "string")
-        : [],
+      parseWarnings,
       metadata.title,
     ),
     metadata,
   };
+}
+
+async function fetchAllDocumentSections(versionId: string): Promise<DocumentDetail["sections"]> {
+  const supabase = getSupabaseClient();
+  const pageSize = 1000;
+  const sections: DocumentDetail["sections"] = [];
+
+  for (let from = 0; ; from += pageSize) {
+    const { data, error } = await supabase
+      .from("policy_document_sections")
+      .select(
+        "id, hierarchy_type, hierarchy_label, hierarchy_order, original_text, path_display, chapter_label, chapter_text, article_label, article_text, paragraph_label, paragraph_text, item_label, item_text, sub_item_label, sub_item_text",
+      )
+      .eq("document_version_id", versionId)
+      .order("hierarchy_order", { ascending: true })
+      .range(from, from + pageSize - 1);
+
+    if (error) {
+      throwAuthAwareError(error.message);
+    }
+
+    sections.push(...((data ?? []) as DocumentDetail["sections"]));
+    if ((data ?? []).length < pageSize) {
+      break;
+    }
+  }
+
+  return sections;
+}
+
+async function rebuildMissingDocumentSections(
+  versionId: string,
+  rawText: string,
+): Promise<DocumentDetail["sections"]> {
+  const supabase = getSupabaseClient();
+  const parseResult = parsePolicyText(rawText);
+  const sections = dedupeParsedSections(parseResult.sections);
+  const hierarchyColumnsById = buildSectionHierarchyColumns(sections);
+  const rows = await Promise.all(sections.map(async (section) => ({
+    id: section.tempId,
+    document_version_id: versionId,
+    parent_section_id: section.parentTempId,
+    hierarchy_type: section.hierarchyType,
+    hierarchy_label: section.hierarchyLabel,
+    hierarchy_order: section.hierarchyOrder,
+    normalized_text: section.normalizedText,
+    original_text: section.originalText,
+    text_hash: await sha256Hex(section.normalizedText),
+    path_display: section.path.join(" > "),
+    ...hierarchyColumnsById.get(section.tempId),
+  })));
+
+  if (rows.length === 0 && rawText.trim()) {
+    rows.push(await buildFallbackDocumentSectionRow(versionId, rawText));
+  }
+
+  if (rows.length === 0) {
+    return [];
+  }
+
+  const { error } = await supabase
+    .from("policy_document_sections")
+    .insert(rows);
+
+  if (error) {
+    throwAuthAwareError(error.message);
+  }
+
+  return fetchAllDocumentSections(versionId);
 }
 
 export async function saveStructuredSections(input: {
@@ -560,8 +1221,9 @@ export async function saveStructuredSections(input: {
   });
 
   const parseResult = parsePolicyText(rebuiltRawText);
-  const hierarchyColumnsById = buildSectionHierarchyColumns(parseResult.sections);
-  const sectionRows = await Promise.all(parseResult.sections.map(async (section) => ({
+  const sections = dedupeParsedSections(parseResult.sections);
+  const hierarchyColumnsById = buildSectionHierarchyColumns(sections);
+  const sectionRows = await Promise.all(sections.map(async (section) => ({
     id: section.tempId,
     document_version_id: input.versionId,
     parent_section_id: section.parentTempId,
@@ -574,6 +1236,9 @@ export async function saveStructuredSections(input: {
     path_display: section.path.join(" > "),
     ...hierarchyColumnsById.get(section.tempId),
   })));
+  if (sectionRows.length === 0 && rebuiltRawText.trim()) {
+    sectionRows.push(await buildFallbackDocumentSectionRow(input.versionId, rebuiltRawText));
+  }
 
   const { error: deleteSectionsError } = await supabase
     .from("policy_document_sections")
@@ -594,16 +1259,22 @@ export async function saveStructuredSections(input: {
     }
   }
 
-  const { error: versionUpdateError } = await supabase
+  const { data: updatedVersion, error: versionUpdateError } = await supabase
     .from("policy_document_versions")
     .update({
       raw_text: rebuiltRawText,
       parse_warnings: parseResult.warnings,
     })
-    .eq("id", input.versionId);
+    .eq("id", input.versionId)
+    .select("id, raw_text")
+    .single();
 
-  if (versionUpdateError) {
-    throw new Error(buildAuthDebugMessage(`structured save version update failed: ${versionUpdateError.message}`, session));
+  if (versionUpdateError || !updatedVersion) {
+    throw new Error(buildAuthDebugMessage(`structured save version update failed: ${versionUpdateError?.message ?? "No version row was updated."}`, session));
+  }
+
+  if ((updatedVersion.raw_text ?? "") !== rebuiltRawText) {
+    throw new Error(buildAuthDebugMessage("structured save verification failed: saved document text did not match the submitted edit.", session));
   }
 
   await supabase.from("policy_audit_logs").insert({
@@ -625,6 +1296,7 @@ export async function saveStructuredSections(input: {
       versionId: input.versionId,
       sectionCount: sectionRows.length,
       warningCount: parseResult.warnings.length,
+      rawText: updatedVersion.raw_text,
     },
   };
 }
@@ -1275,6 +1947,37 @@ function normalizeAiRevisionStageResult(input: unknown): AiRevisionStageResult {
   };
 }
 
+function normalizeAiReportHistoryRow(row: AiReportHistoryRow): AiReportHistoryEntry | null {
+  const selectionCounts = normalizeAnalysisSelectionCounts(row.selection_counts);
+  const guidance = normalizeAiRevisionGuidance(row.guidance);
+
+  if (!selectionCounts || !guidance) {
+    return null;
+  }
+
+  return {
+    id: row.id,
+    createdAt: row.created_at,
+    title: row.title,
+    selectionSummary: row.selection_summary,
+    selectionCounts,
+    guidance,
+  };
+}
+
+function normalizeAnalysisSelectionCounts(value: unknown): AiReportHistoryEntry["selectionCounts"] | null {
+  const source = (value && typeof value === "object" ? value : null) as Record<string, unknown> | null;
+  if (!source) {
+    return null;
+  }
+
+  return {
+    leftDocumentCount: typeof source.leftDocumentCount === "number" ? source.leftDocumentCount : 0,
+    rightDocumentCount: typeof source.rightDocumentCount === "number" ? source.rightDocumentCount : 0,
+    rightLawCount: typeof source.rightLawCount === "number" ? source.rightLawCount : 0,
+  };
+}
+
 async function ensureAuthenticatedSession() {
   const supabase = getSupabaseClient();
   const {
@@ -1547,6 +2250,95 @@ async function sha256Hex(value: string) {
   return Array.from(new Uint8Array(digest))
     .map((item) => item.toString(16).padStart(2, "0"))
     .join("");
+}
+
+function dedupeParsedSections(sections: ParsedSection[]) {
+  const keptIdByKey = new Map<string, string>();
+  const replacementIdBySkippedId = new Map<string, string>();
+  const result: ParsedSection[] = [];
+
+  for (const section of sections) {
+    const key = buildSectionDedupeKey({
+      hierarchyType: section.hierarchyType,
+      hierarchyLabel: section.hierarchyLabel,
+      pathDisplay: section.path.join(" > "),
+      originalText: section.originalText,
+    });
+
+    const keptId = keptIdByKey.get(key);
+    if (keptId) {
+      replacementIdBySkippedId.set(section.tempId, keptId);
+      continue;
+    }
+
+    keptIdByKey.set(key, section.tempId);
+    result.push(section);
+  }
+
+  return result.map((section) => ({
+    ...section,
+    parentTempId: section.parentTempId
+      ? resolveReplacementSectionId(section.parentTempId, replacementIdBySkippedId)
+      : null,
+  }));
+}
+
+function resolveReplacementSectionId(
+  sectionId: string,
+  replacementIdBySkippedId: Map<string, string>,
+) {
+  let current = sectionId;
+  const visited = new Set<string>();
+
+  while (replacementIdBySkippedId.has(current) && !visited.has(current)) {
+    visited.add(current);
+    current = replacementIdBySkippedId.get(current) ?? current;
+  }
+
+  return current;
+}
+
+function dedupeDocumentSectionRecords(
+  sections: DocumentDetail["sections"],
+) {
+  const seen = new Set<string>();
+  const result: DocumentDetail["sections"] = [];
+
+  for (const section of sections) {
+    const key = buildSectionDedupeKey({
+      hierarchyType: section.hierarchy_type,
+      hierarchyLabel: section.hierarchy_label,
+      pathDisplay: section.path_display,
+      originalText: section.original_text,
+    });
+
+    if (seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    result.push(section);
+  }
+
+  return result;
+}
+
+function buildSectionDedupeKey(input: {
+  hierarchyType: string;
+  hierarchyLabel: string;
+  pathDisplay: string;
+  originalText: string;
+}) {
+  return [
+    input.hierarchyType,
+    normalizeTextForDedupe(input.hierarchyLabel),
+    normalizeTextForDedupe(input.pathDisplay),
+    normalizeTextForDedupe(input.originalText),
+  ].join("|");
+}
+
+function normalizeTextForDedupe(value: string) {
+  return value.replace(/\s+/gu, " ").trim();
 }
 
 function guessContentType(fileName: string) {
@@ -1845,7 +2637,7 @@ function throwAuthAwareError(message?: string): never {
 
 async function extractDocumentText(file: File) {
   if (/\.(txt|md)$/iu.test(file.name)) {
-    return file.text();
+    return decodePlainTextBuffer(await file.arrayBuffer());
   }
 
   if (/\.(docx)$/iu.test(file.name)) {
@@ -1861,6 +2653,43 @@ async function extractDocumentText(file: File) {
   }
 
   throw new Error("지원하지 않는 문서 형식입니다.");
+}
+
+export function decodePlainTextBuffer(buffer: ArrayBuffer) {
+  const candidates = [
+    decodeTextCandidate(buffer, "utf-8"),
+    decodeTextCandidate(buffer, "euc-kr"),
+  ].filter((candidate): candidate is { encoding: string; text: string; score: number } => candidate !== null);
+
+  if (candidates.length === 0) {
+    return new TextDecoder().decode(buffer);
+  }
+
+  return candidates.sort((left, right) => left.score - right.score)[0].text.trim();
+}
+
+function decodeTextCandidate(buffer: ArrayBuffer, encoding: string) {
+  try {
+    const text = new TextDecoder(encoding).decode(buffer);
+    return {
+      encoding,
+      text,
+      score: scoreDecodedText(text),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function scoreDecodedText(text: string) {
+  const replacementCount = countMatches(text, /\uFFFD/gu);
+  const hangulCount = countMatches(text, /[가-힣]/gu);
+
+  return replacementCount * 1000 - hangulCount;
+}
+
+function countMatches(value: string, pattern: RegExp) {
+  return Array.from(value.matchAll(pattern)).length;
 }
 
 function isLegacyWordDocument(fileName: string) {

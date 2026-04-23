@@ -8,9 +8,8 @@ interface DocumentListProps {
   onDragDocumentStart: (id: string) => void;
   onDragDocumentEnd: () => void;
   onDelete: (document: DocumentSummary) => void;
-  onReparse: (document: DocumentSummary) => void;
   deletingDocumentId?: string | null;
-  reparsingDocumentId?: string | null;
+  pendingDeleteDocumentId?: string | null;
 }
 
 export function DocumentList({
@@ -21,9 +20,8 @@ export function DocumentList({
   onDragDocumentStart,
   onDragDocumentEnd,
   onDelete,
-  onReparse,
   deletingDocumentId = null,
-  reparsingDocumentId = null,
+  pendingDeleteDocumentId = null,
 }: DocumentListProps) {
   if (documents.length === 0) {
     return (
@@ -68,25 +66,7 @@ export function DocumentList({
             </div>
             <button
               type="button"
-              className="button action-muted select-button"
-              draggable={false}
-              disabled={reparsingDocumentId === document.id}
-              onMouseDown={(event) => {
-                event.stopPropagation();
-              }}
-              onPointerDown={(event) => {
-                event.stopPropagation();
-              }}
-              onClick={(event) => {
-                event.stopPropagation();
-                onReparse(document);
-              }}
-            >
-              {reparsingDocumentId === document.id ? "재파싱 중..." : "재파싱"}
-            </button>
-            <button
-              type="button"
-              className="button action-dark select-button"
+              className={`button action-dark select-button ${pendingDeleteDocumentId === document.id ? "pending-delete" : ""}`}
               draggable={false}
               disabled={deletingDocumentId === document.id}
               onMouseDown={(event) => {
@@ -100,7 +80,11 @@ export function DocumentList({
                 onDelete(document);
               }}
             >
-              {deletingDocumentId === document.id ? "삭제 중..." : "삭제"}
+              {deletingDocumentId === document.id
+                ? "삭제 중..."
+                : pendingDeleteDocumentId === document.id
+                  ? "확인 삭제"
+                  : "삭제"}
             </button>
           </div>
         </div>

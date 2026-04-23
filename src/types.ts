@@ -113,6 +113,7 @@ export interface DocumentDetail {
   description: string | null;
   document_type: string;
   version_number: number;
+  raw_text: string;
   parse_warnings: string[];
   metadata?: {
     title: string | null;
@@ -327,6 +328,8 @@ export interface SavedAnalysisHistoryEntry {
   selectionCounts: AnalysisSelectionCounts;
   guidance: AiRevisionGuidance;
 }
+
+export interface AiReportHistoryEntry extends SavedAnalysisHistoryEntry {}
 
 export interface AiRevisionStageResult {
   stage: AiRevisionAnalysisStage;

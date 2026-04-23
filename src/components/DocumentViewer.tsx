@@ -5,9 +5,10 @@ import type { DocumentDetail } from "../types";
 interface DocumentViewerProps {
   documentId: string | null;
   refreshKey?: number;
+  onDocumentSaved?: () => Promise<void> | void;
 }
 
-export function DocumentViewer({ documentId, refreshKey = 0 }: DocumentViewerProps) {
+export function DocumentViewer({ documentId, refreshKey = 0, onDocumentSaved }: DocumentViewerProps) {
   const [document, setDocument] = useState<DocumentDetail | null>(null);
   const [status, setStatus] = useState("문서를 선택하세요.");
   const [isLoading, setIsLoading] = useState(false);
@@ -86,6 +87,7 @@ export function DocumentViewer({ documentId, refreshKey = 0 }: DocumentViewerPro
       setDraftRevisionDate(refreshed.metadata?.revisionDate ?? "");
       setIsEditing(false);
       setStatus("구조화 섹션 변경사항을 저장했습니다.");
+      await onDocumentSaved?.();
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "구조화 섹션 저장 중 오류가 발생했습니다.");
     } finally {
@@ -157,6 +159,10 @@ export function DocumentViewer({ documentId, refreshKey = 0 }: DocumentViewerPro
         </div>
       </div>
 
+      <div className={`document-viewer-status ${isSaving ? "is-saving" : ""}`}>
+        {status}
+      </div>
+
       <div className="info-card">
         <span className="muted-label">구조화 섹션</span>
         <div className="structured-section-table-wrap">
@@ -177,14 +183,16 @@ export function DocumentViewer({ documentId, refreshKey = 0 }: DocumentViewerPro
               </tr>
             </thead>
             <tbody>
-              {rows.map((row) => {
+              {rows.map((row, index) => {
+                const displayRow = rows[index];
+
                 return (
                   <tr key={row.id}>
-                    {visibleColumns.includes("chapter") ? <td className={getStructuredKeyCellClass(row.chapter)}>{row.chapter}</td> : null}
-                    {visibleColumns.includes("article") ? <td className={getStructuredKeyCellClass(row.article)}>{row.article}</td> : null}
-                    {visibleColumns.includes("paragraph") ? <td className={getStructuredKeyCellClass(row.paragraph)}>{row.paragraph}</td> : null}
-                    {visibleColumns.includes("item") ? <td className={getStructuredKeyCellClass(row.item)}>{row.item}</td> : null}
-                    {visibleColumns.includes("subItem") ? <td className={getStructuredKeyCellClass(row.subItem)}>{row.subItem}</td> : null}
+                    {visibleColumns.includes("chapter") ? <td className={getStructuredKeyCellClass(displayRow.chapter)}>{displayRow.chapter}</td> : null}
+                    {visibleColumns.includes("article") ? <td className={getStructuredKeyCellClass(displayRow.article)}>{displayRow.article}</td> : null}
+                    {visibleColumns.includes("paragraph") ? <td className={getStructuredKeyCellClass(displayRow.paragraph)}>{displayRow.paragraph}</td> : null}
+                    {visibleColumns.includes("item") ? <td className={getStructuredKeyCellClass(displayRow.item)}>{displayRow.item}</td> : null}
+                    {visibleColumns.includes("subItem") ? <td className={getStructuredKeyCellClass(displayRow.subItem)}>{displayRow.subItem}</td> : null}
                     <td className="structured-content-cell">
                       {isEditing ? (
                         <div className="structured-content-editor">
@@ -214,7 +222,7 @@ export function DocumentViewer({ documentId, refreshKey = 0 }: DocumentViewerPro
                             rows={Math.max(2, row.content.split("\n").length)}
                           />
                         </div>
-                      ) : normalizeDisplayedSectionContent(row.content)}
+                      ) : formatStructuredContentForDisplay(row)}
                     </td>
                   </tr>
                 );
@@ -239,25 +247,51 @@ function toEditableRows(sections: DocumentDetail["sections"]) {
   }));
 }
 
+function suppressRepeatedStructuredLabels(rows: EditableStructuredRow[]) {
+  return rows.map((row, index) => {
+    const previous = rows[index - 1];
+    if (!previous) {
+      return row;
+    }
+
+    return {
+      ...row,
+      chapter: row.chapter && row.chapter === previous.chapter ? "" : row.chapter,
+      article: row.article && row.article === previous.article ? "" : row.article,
+      paragraph: row.paragraph && row.paragraph === previous.paragraph ? "" : row.paragraph,
+      item: row.item && row.item === previous.item ? "" : row.item,
+      subItem: row.subItem && row.subItem === previous.subItem ? "" : row.subItem,
+    };
+  });
+}
+
 function applyContentToEditableRow(row: EditableStructuredRow, nextContent: string) {
   const normalizedContent = normalizeDisplayedSectionContent(nextContent);
-  const markers = inferHierarchyMarkers(normalizedContent, "", "document");
+  const markers = inferHierarchyLabels({
+    originalText: normalizedContent,
+    pathDisplay: "",
+    hierarchyType: "document",
+  });
 
   return {
     ...row,
     content: normalizedContent,
-    chapter: markers.chapter ? "✓" : "",
-    article: markers.article ? "✓" : "",
-    paragraph: markers.paragraph ? "✓" : "",
-    item: markers.item ? "✓" : "",
-    subItem: markers.subItem ? "✓" : "",
+    chapter: markers.chapter,
+    article: markers.article,
+    paragraph: markers.paragraph,
+    item: markers.item,
+    subItem: markers.subItem,
   };
 }
 
 function normalizeDisplayedSectionContent(value: string) {
   return value
     .replace(/제\s*([0-9]+)\s*장/gu, "제$1장")
-    .replace(/제\s*([0-9]+(?:의[0-9]+)?)\s*조/gu, "제$1조");
+    .replace(/제\s*([0-9]+)\s*조(?:\s*의\s*([0-9]+))?/gu, (_match, main: string, sub?: string) => `제${main}조${sub ? `의${sub}` : ""}`);
+}
+
+function formatStructuredContentForDisplay(row: EditableStructuredRow) {
+  return normalizeDisplayedSectionContent(row.content);
 }
 
 function normalizeRevisionDateInput(value: string) {
@@ -265,48 +299,57 @@ function normalizeRevisionDateInput(value: string) {
 }
 
 function toStructuredRow(section: DocumentDetail["sections"][number]) {
-  const markers = inferHierarchyMarkers(
-    section.original_text,
-    section.path_display,
-    section.hierarchy_type,
-  );
+  const fallback = parsePathDisplay(section.path_display);
 
   return {
-    chapter: markers.chapter ? "✓" : "",
-    article: markers.article ? "✓" : "",
-    paragraph: markers.paragraph ? "✓" : "",
-    item: markers.item ? "✓" : "",
-    subItem: markers.subItem ? "✓" : "",
+    chapter: normalizeDisplayedSectionContent(section.chapter_label ?? fallback.chapter ?? ""),
+    article: normalizeDisplayedSectionContent(section.article_label ?? fallback.article ?? ""),
+    paragraph: section.paragraph_label ?? fallback.paragraph ?? "",
+    item: section.item_label ?? fallback.item ?? "",
+    subItem: section.sub_item_label ?? fallback.subItem ?? "",
   };
 }
 
-function inferHierarchyMarkers(
-  originalText: string,
-  pathDisplay: string,
-  hierarchyType: DocumentDetail["sections"][number]["hierarchy_type"],
-) {
-  const firstLine = originalText
+function inferHierarchyLabels(input: {
+  originalText: string;
+  pathDisplay: string;
+  hierarchyType: DocumentDetail["sections"][number]["hierarchy_type"];
+  chapterLabel?: string | null;
+  articleLabel?: string | null;
+  paragraphLabel?: string | null;
+  itemLabel?: string | null;
+  subItemLabel?: string | null;
+}) {
+  const firstLine = input.originalText
     .split("\n")
     .map((line) => line.trim())
     .find(Boolean) ?? "";
-  const pathParts = pathDisplay
+  const pathParts = input.pathDisplay
     .split(">")
     .map((value) => value.trim())
     .filter(Boolean);
   const currentPathLabel = pathParts.at(-1) ?? "";
+  const fallback = parsePathDisplay(input.pathDisplay);
+  const lineageLabels = {
+    chapter: input.chapterLabel ?? fallback.chapter ?? "",
+    article: input.articleLabel ?? fallback.article ?? "",
+    paragraph: input.paragraphLabel ?? fallback.paragraph ?? "",
+    item: input.itemLabel ?? fallback.item ?? "",
+    subItem: input.subItemLabel ?? fallback.subItem ?? "",
+  };
 
   const hasChapterMarker =
     /^제\s*\d+\s*장/u.test(firstLine) ||
     /^제\s*\d+\s*장/u.test(currentPathLabel);
   const hasArticleMarker =
-    /^제\s*\d+(?:의\d+)?\s*조/u.test(firstLine) ||
-    /^제\s*\d+(?:의\d+)?\s*조/u.test(currentPathLabel);
+    /^제\s*\d+\s*조(?:\s*의\s*\d+)?/u.test(firstLine) ||
+    /^제\s*\d+\s*조(?:\s*의\s*\d+)?/u.test(currentPathLabel);
   const hasParagraphMarker =
     /^[①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳]/u.test(firstLine) ||
     /^[①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳]/u.test(currentPathLabel);
   const hasItemMarker =
-    /^[0-9]+[.)]/u.test(firstLine) ||
-    /^[0-9]+[.)]/u.test(currentPathLabel);
+    /^[0-9]+(?:\s*의\s*[0-9]+)?[.)]?/u.test(firstLine) ||
+    /^[0-9]+(?:\s*의\s*[0-9]+)?[.)]?/u.test(currentPathLabel);
   const hasSubItemMarker =
     /^[가-힣A-Za-z]\./u.test(firstLine) ||
     /^[가-힣A-Za-z]\./u.test(currentPathLabel);
@@ -321,15 +364,43 @@ function inferHierarchyMarkers(
           ? "paragraph"
           : hasSubItemMarker
             ? "sub_item"
-            : hierarchyType;
+            : input.hierarchyType;
 
   return {
-    chapter: explicitType === "chapter",
-    article: explicitType === "article",
-    paragraph: explicitType === "paragraph",
-    item: explicitType === "item",
-    subItem: explicitType === "sub_item",
+    chapter: explicitType === "chapter" ? extractLeadingLabel(firstLine, "chapter") || currentPathLabel || lineageLabels.chapter : lineageLabels.chapter,
+    article: explicitType === "article" ? extractLeadingLabel(firstLine, "article") || currentPathLabel || lineageLabels.article : lineageLabels.article,
+    paragraph: explicitType === "paragraph" ? extractLeadingLabel(firstLine, "paragraph") || currentPathLabel || lineageLabels.paragraph : lineageLabels.paragraph,
+    item: explicitType === "item" ? extractLeadingLabel(firstLine, "item") || currentPathLabel || lineageLabels.item : lineageLabels.item,
+    subItem: explicitType === "sub_item" ? extractLeadingLabel(firstLine, "sub_item") || currentPathLabel || lineageLabels.subItem : lineageLabels.subItem,
   };
+}
+
+function extractLeadingLabel(
+  text: string,
+  type: Exclude<DocumentDetail["sections"][number]["hierarchy_type"], "document">,
+) {
+  switch (type) {
+    case "chapter": {
+      const match = text.match(/^(제\s*\d+\s*장)/u);
+      return match ? normalizeDisplayedSectionContent(match[1]) : "";
+    }
+    case "article": {
+      const match = text.match(/^(제\s*\d+\s*조(?:\s*의\s*\d+)?)/u);
+      return match ? normalizeDisplayedSectionContent(match[1]) : "";
+    }
+    case "paragraph": {
+      const match = text.match(/^([①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳])/u);
+      return match?.[1] ?? "";
+    }
+    case "item": {
+      const match = text.match(/^([0-9]+(?:\s*의\s*[0-9]+)?[.)]?)/u);
+      return match?.[1] ?? "";
+    }
+    case "sub_item": {
+      const match = text.match(/^([가-힣A-Za-z]\.)/u);
+      return match?.[1] ?? "";
+    }
+  }
 }
 
 function parsePathDisplay(pathDisplay: string) {
@@ -362,7 +433,7 @@ function parsePathDisplay(pathDisplay: string) {
       continue;
     }
 
-    if (/^[0-9]+\.$/u.test(part) || /^[0-9]+\)$/u.test(part)) {
+    if (/^[0-9]+(?:\s*의\s*[0-9]+)?[.)]?$/u.test(part)) {
       row.item = part;
       continue;
     }
@@ -376,9 +447,9 @@ function parsePathDisplay(pathDisplay: string) {
 }
 
 function orderStructuredSections(sections: DocumentDetail["sections"]) {
-  return sortSections(
-    sections.filter((section) => section.hierarchy_type !== "document"),
-  );
+  return [...sections]
+    .filter((section) => section.hierarchy_type !== "document")
+    .sort((left, right) => left.hierarchy_order - right.hierarchy_order);
 }
 
 function sortSections(sections: DocumentDetail["sections"]) {
@@ -427,7 +498,7 @@ function parseChapterLabel(value: string) {
 }
 
 function parseArticleLabel(value: string) {
-  const match = value.match(/제\s*([0-9]+)(?:의([0-9]+))?/u);
+  const match = value.match(/제\s*([0-9]+)\s*조(?:\s*의\s*([0-9]+))?/u);
   if (!match) {
     return Number.MAX_SAFE_INTEGER;
   }
@@ -444,8 +515,12 @@ function parseCircledLabel(value: string) {
 }
 
 function parseNumericLabel(value: string) {
-  const match = value.match(/^([0-9]+)/u);
-  return match ? Number(match[1]) : Number.MAX_SAFE_INTEGER;
+  const match = value.match(/^([0-9]+)(?:\s*의\s*([0-9]+))?/u);
+  if (!match) {
+    return Number.MAX_SAFE_INTEGER;
+  }
+
+  return Number(match[1]) + (match[2] ? Number(match[2]) / 1000 : 0);
 }
 
 function parseSubItemLabel(value: string) {

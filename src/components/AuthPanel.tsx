@@ -9,10 +9,15 @@ import type { Session } from "@supabase/supabase-js";
 
 interface AuthPanelProps {
   session: Session | null;
+  allowedDomain?: string | null;
 }
 
-export function AuthPanel({ session }: AuthPanelProps) {
-  const [message, setMessage] = useState("Google OAuth 로그인을 사용합니다.");
+export function AuthPanel({ session, allowedDomain = null }: AuthPanelProps) {
+  const [message, setMessage] = useState(
+    allowedDomain
+      ? `Google OAuth 로그인을 사용합니다. 허용 도메인: ${allowedDomain}`
+      : "Google OAuth 로그인을 사용합니다.",
+  );
   const accountEmail = session?.user.email ?? "Google OAuth";
   const accountHint = session
     ? "현재 로그인된 계정입니다."
@@ -26,6 +31,11 @@ export function AuthPanel({ session }: AuthPanelProps) {
       provider: "google",
       options: {
         redirectTo,
+        queryParams: allowedDomain
+          ? {
+              hd: allowedDomain,
+            }
+          : undefined,
       },
     });
     setMessage(error ? normalizeSupabaseAuthError(error.message) : "Google 로그인으로 이동합니다.");

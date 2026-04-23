@@ -1,17 +1,20 @@
 import { useEffect, useEffectEvent, useRef, useState } from "react";
 import {
   classifyRevision,
+  deleteAiReportHistoryEntry,
   getAggregatedComparisonReview,
   getComparisonReview,
+  listAiReportHistory,
+  saveAiReportHistoryEntry,
 } from "../lib/documentService";
 import type {
+  AiReportHistoryEntry,
   AiComparisonReport,
   AiGroupReport,
   AiRevisionGuidance,
   ComparisonReviewAggregate,
   ComparisonReviewDetail,
   OpenAiSettings,
-  SavedAnalysisHistoryEntry,
 } from "../types";
 
 interface ComparisonReviewPanelProps {
@@ -20,7 +23,6 @@ interface ComparisonReviewPanelProps {
   selectedDocumentIds?: string[];
   referenceDocumentIds?: string[];
   selectedLawVersionIds?: string[];
-  historyStorageKey?: string;
   viewMode?: "results" | "history";
   setStatus: (value: string) => void;
   onOverviewChange?: (value: ComparisonReviewOverviewSnapshot) => void;
@@ -69,7 +71,6 @@ export function ComparisonReviewPanel({
   selectedDocumentIds = [],
   referenceDocumentIds = [],
   selectedLawVersionIds = [],
-  historyStorageKey,
   viewMode = "results",
   setStatus,
   onOverviewChange,
@@ -84,9 +85,11 @@ export function ComparisonReviewPanel({
   const [progressNow, setProgressNow] = useState(() => Date.now());
   const [isLoading, setIsLoading] = useState(false);
   const [isClassifying, setIsClassifying] = useState(false);
-  const [savedHistory, setSavedHistory] = useState<SavedAnalysisHistoryEntry[]>([]);
-  const [loadedHistoryEntry, setLoadedHistoryEntry] = useState<SavedAnalysisHistoryEntry | null>(null);
+  const [savedHistory, setSavedHistory] = useState<AiReportHistoryEntry[]>([]);
+  const [loadedHistoryEntry, setLoadedHistoryEntry] = useState<AiReportHistoryEntry | null>(null);
+  const [historyHydrated, setHistoryHydrated] = useState(false);
   const lastAutoSavedSignatureRef = useRef<string | null>(null);
+  const pendingAutoSaveSignatureRef = useRef<string | null>(null);
   const selectionSummary = getSelectionSummary(
     selectedDocumentIds.length,
     referenceDocumentIds.length,
@@ -123,8 +126,17 @@ export function ComparisonReviewPanel({
   }, [analysisState.analysisStageStartedAt, analysisState.isAnalyzingSelection]);
 
   useEffect(() => {
-    setSavedHistory(readSavedAnalysisHistory(historyStorageKey));
-  }, [historyStorageKey]);
+    setHistoryHydrated(false);
+    listAiReportHistory()
+      .then((entries) => {
+        setSavedHistory(entries);
+        setHistoryHydrated(true);
+      })
+      .catch((error: Error) => {
+        setHistoryHydrated(true);
+        emitStatus(error.message);
+      });
+  }, [emitStatus]);
 
   useEffect(() => {
     onOverviewChange?.({
@@ -136,7 +148,7 @@ export function ComparisonReviewPanel({
   }, [analysisState.apiCallCount, onOverviewChange, selectionCounts, selectionSummary, stageProgress]);
 
   useEffect(() => {
-    if (!analysisState.aiGuidance) {
+    if (!analysisState.aiGuidance || !historyHydrated) {
       return;
     }
 
@@ -145,6 +157,10 @@ export function ComparisonReviewPanel({
       guidance: analysisState.aiGuidance,
     });
     if (lastAutoSavedSignatureRef.current === signature) {
+      return;
+    }
+
+    if (pendingAutoSaveSignatureRef.current === signature) {
       return;
     }
 
@@ -159,16 +175,24 @@ export function ComparisonReviewPanel({
       return;
     }
 
-    const next = [createSavedHistoryEntry({
+    pendingAutoSaveSignatureRef.current = signature;
+    saveAiReportHistoryEntry({
+      title: buildSavedHistoryTitle(selectionCounts),
       selectionSummary,
       selectionCounts,
       guidance: analysisState.aiGuidance,
-    }), ...savedHistory].slice(0, 20);
-    setSavedHistory(next);
-    writeSavedAnalysisHistory(historyStorageKey, next);
-    lastAutoSavedSignatureRef.current = signature;
-    emitStatus("현재 AI 비교 리포트를 이력에 자동 저장했습니다.");
-  }, [analysisState.aiGuidance, emitStatus, historyStorageKey, savedHistory, selectionCounts, selectionSummary]);
+    })
+      .then((entry) => {
+        setSavedHistory((current) => [entry, ...current].slice(0, 50));
+        lastAutoSavedSignatureRef.current = signature;
+        pendingAutoSaveSignatureRef.current = null;
+        emitStatus("현재 AI 비교 리포트를 DB 이력에 자동 저장했습니다.");
+      })
+      .catch((error: Error) => {
+        pendingAutoSaveSignatureRef.current = null;
+        emitStatus(error.message);
+      });
+  }, [analysisState.aiGuidance, emitStatus, historyHydrated, savedHistory, selectionCounts, selectionSummary]);
 
   useEffect(() => {
     if (comparisonRunIds.length > 1) {
@@ -235,24 +259,27 @@ export function ComparisonReviewPanel({
     }
   }
 
-  function handleSaveCurrentReport() {
+  async function handleSaveCurrentReport() {
     if (!analysisState.aiGuidance) {
       return;
     }
 
-    const entry = createSavedHistoryEntry({
-      selectionSummary,
-      selectionCounts,
-      guidance: analysisState.aiGuidance,
-    });
-    const next = [entry, ...savedHistory].slice(0, 20);
-    setSavedHistory(next);
-    writeSavedAnalysisHistory(historyStorageKey, next);
-    lastAutoSavedSignatureRef.current = buildSavedHistorySignature({
-      selectionCounts,
-      guidance: analysisState.aiGuidance,
-    });
-    emitStatus("현재 AI 비교 리포트를 이력에 저장했습니다.");
+    try {
+      const entry = await saveAiReportHistoryEntry({
+        title: buildSavedHistoryTitle(selectionCounts),
+        selectionSummary,
+        selectionCounts,
+        guidance: analysisState.aiGuidance,
+      });
+      setSavedHistory((current) => [entry, ...current].slice(0, 50));
+      lastAutoSavedSignatureRef.current = buildSavedHistorySignature({
+        selectionCounts,
+        guidance: analysisState.aiGuidance,
+      });
+      emitStatus("현재 AI 비교 리포트를 DB 이력에 저장했습니다.");
+    } catch (error) {
+      emitStatus(error instanceof Error ? error.message : "AI 리포트 저장에 실패했습니다.");
+    }
   }
 
   function handleLoadSavedReport(entryId: string) {
@@ -268,11 +295,14 @@ export function ComparisonReviewPanel({
     emitStatus(`저장된 AI 리포트 이력을 불러왔습니다. (${formatSavedHistoryTimestamp(entry.createdAt)})`);
   }
 
-  function handleDeleteSavedReport(entryId: string) {
-    const next = savedHistory.filter((item) => item.id !== entryId);
-    setSavedHistory(next);
-    writeSavedAnalysisHistory(historyStorageKey, next);
-    emitStatus("선택한 AI 리포트 이력을 삭제했습니다.");
+  async function handleDeleteSavedReport(entryId: string) {
+    try {
+      await deleteAiReportHistoryEntry(entryId);
+      setSavedHistory((current) => current.filter((item) => item.id !== entryId));
+      emitStatus("선택한 AI 리포트 이력을 DB에서 삭제했습니다.");
+    } catch (error) {
+      emitStatus(error instanceof Error ? error.message : "AI 리포트 이력 삭제에 실패했습니다.");
+    }
   }
 
   const hasSelectionContext =
@@ -691,7 +721,7 @@ function AiGuidancePanel(input: {
 }
 
 function SavedAnalysisHistorySection(input: {
-  entries: SavedAnalysisHistoryEntry[];
+  entries: AiReportHistoryEntry[];
   onLoad: (entryId: string) => void;
   onDelete: (entryId: string) => void;
 }) {
@@ -1066,32 +1096,6 @@ function runStageWithTimeout<T>(label: string, promise: Promise<T>) {
   ]);
 }
 
-function readSavedAnalysisHistory(storageKey?: string) {
-  if (!storageKey || typeof window === "undefined") {
-    return [] as SavedAnalysisHistoryEntry[];
-  }
-
-  const raw = window.localStorage.getItem(storageKey);
-  if (!raw) {
-    return [] as SavedAnalysisHistoryEntry[];
-  }
-
-  try {
-    const parsed = JSON.parse(raw) as SavedAnalysisHistoryEntry[];
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [] as SavedAnalysisHistoryEntry[];
-  }
-}
-
-function writeSavedAnalysisHistory(storageKey: string | undefined, entries: SavedAnalysisHistoryEntry[]) {
-  if (!storageKey || typeof window === "undefined") {
-    return;
-  }
-
-  window.localStorage.setItem(storageKey, JSON.stringify(entries));
-}
-
 function formatSavedHistoryTimestamp(value: string) {
   try {
     return new Date(value).toLocaleString("ko-KR", {
@@ -1106,23 +1110,12 @@ function formatSavedHistoryTimestamp(value: string) {
   }
 }
 
-function createSavedHistoryEntry(input: {
-  selectionSummary: string;
-  selectionCounts: SavedAnalysisHistoryEntry["selectionCounts"];
-  guidance: AiRevisionGuidance;
-}): SavedAnalysisHistoryEntry {
-  return {
-    id: crypto.randomUUID(),
-    createdAt: new Date().toISOString(),
-    title: `비교 대상 ${input.selectionCounts.leftDocumentCount}건 · 기준 문서 ${input.selectionCounts.rightDocumentCount}건 · 법령 ${input.selectionCounts.rightLawCount}건`,
-    selectionSummary: input.selectionSummary,
-    selectionCounts: input.selectionCounts,
-    guidance: input.guidance,
-  };
+function buildSavedHistoryTitle(selectionCounts: AiReportHistoryEntry["selectionCounts"]) {
+  return `비교 대상 ${selectionCounts.leftDocumentCount}건 · 기준 문서 ${selectionCounts.rightDocumentCount}건 · 법령 ${selectionCounts.rightLawCount}건`;
 }
 
 function buildSavedHistorySignature(input: {
-  selectionCounts: SavedAnalysisHistoryEntry["selectionCounts"];
+  selectionCounts: AiReportHistoryEntry["selectionCounts"];
   guidance: AiRevisionGuidance;
 }) {
   return JSON.stringify({
