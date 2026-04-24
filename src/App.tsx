@@ -4,6 +4,7 @@ import { AuthPanel } from "./components/AuthPanel";
 import {
   ComparisonReviewPanel,
   type ComparisonReviewAnalysisState,
+  getSelectionSummary,
   getStageProgress,
   type ComparisonReviewOverviewSnapshot,
 } from "./components/ComparisonReviewPanel";

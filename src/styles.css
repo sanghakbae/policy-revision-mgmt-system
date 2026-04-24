@@ -84,7 +84,7 @@ textarea {
 
 .app-frame {
   width: 100%;
-  overflow: hidden;
+  overflow: visible;
   border: 1px solid rgba(35, 49, 42, 0.14);
   border-radius: 22px;
   background: rgba(255, 255, 255, 0.78);
@@ -104,10 +104,22 @@ textarea {
   align-items: stretch;
   width: 100%;
   min-height: var(--workspace-viewport-height);
+  overflow: hidden;
+  border-radius: inherit;
 }
 
 .workspace-shell-sidebar-collapsed {
   grid-template-columns: 64px minmax(0, 1fr);
+  overflow: visible;
+}
+
+.workspace-shell-sidebar-collapsed .workspace-sidebar {
+  z-index: 40;
+}
+
+.workspace-shell-sidebar-collapsed .workspace-content {
+  position: relative;
+  z-index: 1;
 }
 
 .workspace-shell.no-sidebar {
@@ -382,7 +394,7 @@ textarea {
   position: absolute;
   left: calc(100% + 10px);
   top: 50%;
-  z-index: 20;
+  z-index: 1000;
   display: block;
   min-width: max-content;
   padding: 6px 8px;

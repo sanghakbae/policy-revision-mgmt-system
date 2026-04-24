@@ -271,10 +271,6 @@ export function ComparisonReviewPanel({
         guidance: analysisState.aiGuidance,
       });
       setSavedHistory((current) => [entry, ...current].slice(0, 50));
-      lastAutoSavedSignatureRef.current = buildSavedHistorySignature({
-        selectionCounts,
-        guidance: analysisState.aiGuidance,
-      });
       emitStatus("현재 AI 비교 리포트를 DB 이력에 저장했습니다.");
     } catch (error) {
       emitStatus(error instanceof Error ? error.message : "AI 리포트 저장에 실패했습니다.");
@@ -1609,7 +1605,7 @@ function getStatusTone(status: ComparisonReviewDetail["revision_status"]) {
   }
 }
 
-function getSelectionSummary(
+export function getSelectionSummary(
   selectedDocumentCount: number,
   referenceDocumentCount: number,
   selectedLawVersionCount: number,
