@@ -47,6 +47,11 @@ export interface OpenAiSettings {
   model: string;
 }
 
+export interface SecuritySettings {
+  allowedEmailDomain: string;
+  sessionIdleTimeoutMinutes: number;
+}
+
 export interface ReviewExecutionHistoryEntry {
   id: string;
   createdAt: string;

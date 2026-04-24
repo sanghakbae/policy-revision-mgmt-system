@@ -24,6 +24,11 @@ interface ComparisonReviewPanelProps {
   referenceDocumentIds?: string[];
   selectedLawVersionIds?: string[];
   viewMode?: "results" | "history";
+  autoLoadHistoryRequest?: {
+    requestId: number;
+    selectionSummary: string;
+    selectionCounts: AiReportHistoryEntry["selectionCounts"];
+  } | null;
   setStatus: (value: string) => void;
   onOverviewChange?: (value: ComparisonReviewOverviewSnapshot) => void;
   analysisState: ComparisonReviewAnalysisState;
@@ -72,6 +77,7 @@ export function ComparisonReviewPanel({
   referenceDocumentIds = [],
   selectedLawVersionIds = [],
   viewMode = "results",
+  autoLoadHistoryRequest = null,
   setStatus,
   onOverviewChange,
   analysisState,
@@ -157,6 +163,26 @@ export function ComparisonReviewPanel({
     selectionSummary,
     viewMode,
   ]);
+
+  useEffect(() => {
+    if (viewMode !== "history" || !autoLoadHistoryRequest || savedHistory.length === 0) {
+      return;
+    }
+
+    const entry = findExactHistoryEntry(
+      savedHistory,
+      autoLoadHistoryRequest.selectionSummary,
+      autoLoadHistoryRequest.selectionCounts,
+    );
+
+    if (!entry) {
+      emitStatus("조건에 맞는 저장된 AI 리포트 이력을 찾지 못했습니다.");
+      return;
+    }
+
+    setLoadedHistoryEntry(entry);
+    emitStatus(`검토 이력에서 연결된 AI 리포트를 불러왔습니다. (${formatSavedHistoryTimestamp(entry.createdAt)})`);
+  }, [autoLoadHistoryRequest, emitStatus, savedHistory, viewMode]);
 
   useEffect(() => {
     onOverviewChange?.({
@@ -299,10 +325,20 @@ export function ComparisonReviewPanel({
   if (loadedHistoryEntry) {
     return (
       <div className="stack comparison-review-shell">
-        <div className="section-header comparison-review-header">
-          <div>
-            <h2>비교 검토</h2>
-            <p>저장된 AI 리포트 이력을 불러온 화면입니다.</p>
+        {shouldShowHistory ? (
+          <SavedAnalysisHistorySection
+            entries={savedHistory}
+            onLoad={handleLoadSavedReport}
+            onDelete={handleDeleteSavedReport}
+          />
+        ) : null}
+        <div className="info-card comparison-history-loaded-card">
+          <div className="comparison-history-loaded-main">
+            <span className="muted-label">저장된 리포트</span>
+            <strong>{loadedHistoryEntry.title}</strong>
+            <p className="helper-text detailed-empty-reason">
+              저장 시각 {formatSavedHistoryTimestamp(loadedHistoryEntry.createdAt)}
+            </p>
           </div>
           <button
             type="button"
@@ -313,20 +349,6 @@ export function ComparisonReviewPanel({
           >
             이력 닫기
           </button>
-        </div>
-        {shouldShowHistory ? (
-          <SavedAnalysisHistorySection
-            entries={savedHistory}
-            onLoad={handleLoadSavedReport}
-            onDelete={handleDeleteSavedReport}
-          />
-        ) : null}
-        <div className="info-card comparison-history-loaded-card">
-          <span className="muted-label">저장된 리포트</span>
-          <strong>{loadedHistoryEntry.title}</strong>
-          <p className="helper-text detailed-empty-reason">
-            저장 시각 {formatSavedHistoryTimestamp(loadedHistoryEntry.createdAt)}
-          </p>
         </div>
         <AiGuidancePanel
           guidance={displayedGuidance}
@@ -736,10 +758,6 @@ function SavedAnalysisHistorySection(input: {
 
   return (
     <section className="review-column comparison-history-shell">
-      <div className="section-header">
-        <h3>AI 리포트 이력</h3>
-        <p>저장한 AI 비교 리포트를 다시 열어 현재 패널에서 확인할 수 있습니다.</p>
-      </div>
       {input.entries.length === 0 ? (
         <div className="info-card">
           <strong>저장된 AI 리포트 이력이 없습니다.</strong>
@@ -747,48 +765,29 @@ function SavedAnalysisHistorySection(input: {
         </div>
       ) : (
         <div className="stack">
-          <div className="comparison-table-wrap comparison-history-table-wrap">
-            <table className="comparison-data-table comparison-history-table">
-              <thead>
-                <tr>
-                  <th>저장 시각</th>
-                  <th>리포트</th>
-                  <th>비교 범위</th>
-                  <th>선택 건수</th>
-                  <th>OpenAI 호출</th>
-                  <th>작업</th>
-                </tr>
-              </thead>
-              <tbody>
-                {pageEntries.map((entry) => (
-                  <tr key={entry.id}>
-                    <td>{formatSavedHistoryTimestamp(entry.createdAt)}</td>
-                    <td className="comparison-history-table-cell-left">
-                      <strong>{entry.title}</strong>
-                    </td>
-                    <td className="comparison-history-table-cell-left">{entry.selectionSummary}</td>
-                    <td className="comparison-history-table-cell-left">
-                      비교 대상 {entry.selectionCounts.leftDocumentCount}건
-                      <br />
-                      기준 문서 {entry.selectionCounts.rightDocumentCount}건
-                      <br />
-                      법령 {entry.selectionCounts.rightLawCount}건
-                    </td>
-                    <td>{entry.guidance.api_call_count}건</td>
-                    <td>
-                      <div className="comparison-history-table-actions">
-                        <button type="button" className="button ghost" onClick={() => input.onLoad(entry.id)}>
-                          열기
-                        </button>
-                        <button type="button" className="button ghost" onClick={() => input.onDelete(entry.id)}>
-                          삭제
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          <div className="ai-report-history-list">
+            {pageEntries.map((entry) => (
+              <article key={entry.id} className="ai-report-history-item">
+                <div className="ai-report-history-main">
+                  <span className="muted-label">{formatSavedHistoryTimestamp(entry.createdAt)}</span>
+                  <strong>{entry.title}</strong>
+                  <p>{entry.selectionSummary}</p>
+                </div>
+                <div className="ai-report-history-meta">
+                  <span>대상 {entry.selectionCounts.leftDocumentCount}</span>
+                  <span>기준 {entry.selectionCounts.rightDocumentCount + entry.selectionCounts.rightLawCount}</span>
+                  <span>호출 {entry.guidance.api_call_count}</span>
+                </div>
+                <div className="ai-report-history-actions">
+                  <button type="button" className="button ghost" onClick={() => input.onLoad(entry.id)}>
+                    열기
+                  </button>
+                  <button type="button" className="button ghost" onClick={() => input.onDelete(entry.id)}>
+                    삭제
+                  </button>
+                </div>
+              </article>
+            ))}
           </div>
           {totalPages > 1 ? (
             <div className="comparison-history-pagination">
@@ -1170,14 +1169,22 @@ function findBestHistoryEntry(
   selectionSummary: string,
   selectionCounts: AiReportHistoryEntry["selectionCounts"],
 ) {
-  const exactMatch = entries.find((entry) =>
+  const exactMatch = findExactHistoryEntry(entries, selectionSummary, selectionCounts);
+
+  return exactMatch ?? entries[0] ?? null;
+}
+
+function findExactHistoryEntry(
+  entries: AiReportHistoryEntry[],
+  selectionSummary: string,
+  selectionCounts: AiReportHistoryEntry["selectionCounts"],
+) {
+  return entries.find((entry) =>
     entry.selectionSummary === selectionSummary &&
     entry.selectionCounts.leftDocumentCount === selectionCounts.leftDocumentCount &&
     entry.selectionCounts.rightDocumentCount === selectionCounts.rightDocumentCount &&
     entry.selectionCounts.rightLawCount === selectionCounts.rightLawCount,
-  );
-
-  return exactMatch ?? entries[0] ?? null;
+  ) ?? null;
 }
 
 export function getStageProgress(input: {

@@ -24,6 +24,7 @@ import {
   deleteLawSource,
   deleteDocument,
   getDocumentDetail,
+  getPolicySecuritySettings,
   getPolicyUserOpenAiSettings,
   listComparisonRuns,
   listDocuments,
@@ -34,6 +35,7 @@ import {
   reparseDocument,
   runComparison,
   saveAiReportHistoryEntry,
+  savePolicySecuritySettings,
   savePolicyUserOpenAiSettings,
   saveReviewExecutionHistoryEntry,
   updateReviewExecutionHistoryStatus,
@@ -56,6 +58,7 @@ import type {
   PromptSlotIndex,
   PromptSlotList,
   ReviewExecutionHistoryEntry,
+  SecuritySettings,
   WorkspaceFavorite,
   WorkspaceSelectionSnapshot,
 } from "./types";
@@ -82,7 +85,6 @@ type WorkspaceSection =
   | "comparison"
   | "results"
   | "history"
-  | "aiHistory"
   | "settings";
 
 const WORKSPACE_SECTION_STORAGE_KEY = "policy-revision-mgmt-active-workspace-section";
@@ -92,10 +94,14 @@ const WORKSPACE_SECTIONS: WorkspaceSection[] = [
   "comparison",
   "results",
   "history",
-  "aiHistory",
   "settings",
 ];
-const ALLOWED_EMAIL_DOMAIN = import.meta.env.VITE_ALLOWED_DOMAIN?.trim().toLowerCase() || null;
+const REVIEW_HISTORY_PAGE_SIZE = 5;
+const DEFAULT_SECURITY_SETTINGS: SecuritySettings = {
+  allowedEmailDomain: "muhayu.com",
+  sessionIdleTimeoutMinutes: 60,
+};
+const SESSION_ACTIVITY_REFRESH_THROTTLE_MS = 15 * 1000;
 
 function getPortalWorkspaceSection(
   embeddedContext?: { project?: string; view?: string; embedded?: boolean },
@@ -165,18 +171,34 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
   const [workspaceSelectionHydrated, setWorkspaceSelectionHydrated] = useState(false);
   const [workspaceFavorites, setWorkspaceFavorites] = useState<WorkspaceFavorite[]>([]);
   const [reviewExecutionHistory, setReviewExecutionHistory] = useState<ReviewExecutionHistoryEntry[]>([]);
+  const [reviewHistoryPage, setReviewHistoryPage] = useState(1);
+  const [aiHistoryLoadRequest, setAiHistoryLoadRequest] = useState<{
+    requestId: number;
+    selectionSummary: string;
+    selectionCounts: {
+      leftDocumentCount: number;
+      rightDocumentCount: number;
+      rightLawCount: number;
+    };
+  } | null>(null);
   const [pendingAiOnlyReviewHistoryId, setPendingAiOnlyReviewHistoryId] = useState<string | null>(null);
   const [openAiSettings, setOpenAiSettings] = useState<OpenAiSettings>({
     apiKey: "",
     model: DEFAULT_OPENAI_MODEL,
   });
   const [openAiSettingsHydrated, setOpenAiSettingsHydrated] = useState(false);
+  const [securitySettings, setSecuritySettings] = useState<SecuritySettings>(DEFAULT_SECURITY_SETTINGS);
+  const [securitySettingsHydrated, setSecuritySettingsHydrated] = useState(false);
   const openAiSettingsSaveTimerRef = useRef<number | null>(null);
   const openAiSettingsDirtyRef = useRef(false);
   const openAiSettingsSaveRequestIdRef = useRef(0);
+  const securitySettingsSaveTimerRef = useRef<number | null>(null);
+  const securitySettingsDirtyRef = useRef(false);
+  const securitySettingsSaveRequestIdRef = useRef(0);
   const [activeWorkspaceSection, setActiveWorkspaceSection] = useState<WorkspaceSection>(
     () => portalWorkspaceSection ?? readWorkspaceSection() ?? "dashboard",
   );
+  const [isWorkspaceSidebarCollapsed, setIsWorkspaceSidebarCollapsed] = useState(false);
   const [appNotice, setAppNoticeState] = useState<AppNotice | null>(null);
   const [comparisonOverview, setComparisonOverview] = useState<ComparisonReviewOverviewSnapshot | null>(null);
   const [comparisonAnalysisState, setComparisonAnalysisState] = useState<ComparisonReviewAnalysisState>(
@@ -194,30 +216,59 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
     right: 0,
     final: 0,
   });
+  const lastSessionActivityAtRef = useRef(Date.now());
+  const lastSessionActivityRecordAtRef = useRef(0);
   const isSupabaseConfigured = hasSupabaseEnv();
   const sessionUserId = session?.user.id ?? null;
 
-  function setAppNotice(nextNotice: AppNotice) {
+  function setAppNotice(nextNotice: AppNotice | null) {
+    if (
+      nextNotice &&
+      isTransientFetchStatus(`${nextNotice.title}\n${nextNotice.detail ?? ""}`)
+    ) {
+      setAppNoticeState((current) =>
+        current && isTransientFetchStatus(`${current.title}\n${current.detail ?? ""}`) ? null : current,
+      );
+      return;
+    }
+
     setAppNoticeState(nextNotice);
   }
 
   function setStatus(message: string) {
+    if (isTransientFetchStatus(message)) {
+      setAppNoticeState((current) =>
+        current && isTransientFetchStatus(`${current.title}\n${current.detail ?? ""}`) ? null : current,
+      );
+      console.warn("[status] transient fetch failure suppressed:", message);
+      return;
+    }
+
+    const [titleLine, ...restLines] = message
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+    const explicitDetail = restLines.join("\n").trim();
+    const inferredDetail = inferNoticeDetail(message);
     setAppNotice({
       tone: inferNoticeTone(message),
       label: "작업 상태",
-      title: message,
-      detail: inferNoticeDetail(message),
+      title: titleLine || message,
+      detail: [explicitDetail, inferredDetail].filter(Boolean).join("\n\n") || undefined,
       actions: inferNoticeActions(message),
     });
   }
 
-  function isAllowedEmailDomain(email?: string | null) {
-    if (!ALLOWED_EMAIL_DOMAIN) {
-      return true;
+  useEffect(() => {
+    if (appNotice && isTransientFetchStatus(`${appNotice.title}\n${appNotice.detail ?? ""}`)) {
+      setAppNoticeState(null);
     }
+  }, [appNotice]);
 
+  function isAllowedEmailDomain(email?: string | null) {
     const normalizedEmail = email?.trim().toLowerCase() ?? "";
-    return normalizedEmail.endsWith(`@${ALLOWED_EMAIL_DOMAIN}`);
+    const allowedDomain = normalizeAllowedEmailDomain(securitySettings.allowedEmailDomain);
+    return normalizedEmail.endsWith(`@${allowedDomain}`);
   }
 
   async function rejectDisallowedSession(email?: string | null) {
@@ -227,8 +278,8 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
       tone: "danger",
       label: "인증 제한",
       title: "허용되지 않은 Google Workspace 도메인입니다.",
-      detail: ALLOWED_EMAIL_DOMAIN
-        ? `${ALLOWED_EMAIL_DOMAIN} 계정만 로그인할 수 있습니다. 현재 계정: ${email ?? "알 수 없음"}`
+      detail: securitySettings.allowedEmailDomain
+        ? `${normalizeAllowedEmailDomain(securitySettings.allowedEmailDomain)} 계정만 로그인할 수 있습니다. 현재 계정: ${email ?? "알 수 없음"}`
         : "허용 도메인 설정을 확인하세요.",
       actions: ["허용된 계정으로 다시 로그인하세요."],
     });
@@ -241,6 +292,12 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
   function hasAiOnlyHistoryResult(entry: ReviewExecutionHistoryEntry) {
     return entry.resultStatus === "ai_completed";
   }
+
+  useEffect(() => {
+    setReviewHistoryPage((current) =>
+      Math.min(current, Math.max(1, Math.ceil(reviewExecutionHistory.length / REVIEW_HISTORY_PAGE_SIZE))),
+    );
+  }, [reviewExecutionHistory.length]);
 
   async function handleHeaderSignOut() {
     const supabase = getSupabaseClient();
@@ -431,7 +488,7 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
       cancelled = true;
       subscription.unsubscribe();
     };
-  }, [embeddedWorkspace, isSupabaseConfigured]);
+  }, [embeddedWorkspace, isSupabaseConfigured, securitySettings.allowedEmailDomain]);
 
   useEffect(() => {
     if (!embeddedWorkspace) {
@@ -440,6 +497,82 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
 
     setActiveWorkspaceSection(portalWorkspaceSection ?? "dashboard");
   }, [embeddedWorkspace, portalWorkspaceSection]);
+
+  useEffect(() => {
+    if (!session || embeddedWorkspace || !isSupabaseConfigured) {
+      return;
+    }
+
+    const supabase = getSupabaseClient();
+    const sessionIdleTimeoutMinutes = normalizeSessionIdleTimeoutMinutes(
+      securitySettings.sessionIdleTimeoutMinutes,
+    );
+    const sessionIdleTimeoutMs = sessionIdleTimeoutMinutes * 60 * 1000;
+    let timeoutHandled = false;
+    lastSessionActivityAtRef.current = Date.now();
+    lastSessionActivityRecordAtRef.current = 0;
+
+    function recordSessionActivity() {
+      const now = Date.now();
+      if (now - lastSessionActivityRecordAtRef.current < SESSION_ACTIVITY_REFRESH_THROTTLE_MS) {
+        return;
+      }
+
+      lastSessionActivityAtRef.current = now;
+      lastSessionActivityRecordAtRef.current = now;
+    }
+
+    async function expireIdleSession() {
+      if (timeoutHandled) {
+        return;
+      }
+
+      timeoutHandled = true;
+      await supabase.auth.signOut();
+      clearSupabaseAuthStorage();
+      setSession(null);
+      setAppNotice({
+        tone: "warning",
+        label: "세션 만료",
+        title: `${sessionIdleTimeoutMinutes}분 동안 사용이 없어 로그아웃되었습니다.`,
+        detail: `계속 사용하려면 ${normalizeAllowedEmailDomain(securitySettings.allowedEmailDomain)} Google 계정으로 다시 로그인하세요.`,
+        actions: ["Google 로그인을 다시 진행하세요."],
+      });
+    }
+
+    function checkIdleTimeout() {
+      if (Date.now() - lastSessionActivityAtRef.current >= sessionIdleTimeoutMs) {
+        void expireIdleSession();
+      }
+    }
+
+    const activityEvents: Array<keyof WindowEventMap> = [
+      "click",
+      "keydown",
+      "pointerdown",
+      "scroll",
+      "focus",
+    ];
+    activityEvents.forEach((eventName) => {
+      window.addEventListener(eventName, recordSessionActivity, { passive: true });
+    });
+    document.addEventListener("visibilitychange", recordSessionActivity);
+    const intervalId = window.setInterval(checkIdleTimeout, 30 * 1000);
+
+    return () => {
+      activityEvents.forEach((eventName) => {
+        window.removeEventListener(eventName, recordSessionActivity);
+      });
+      document.removeEventListener("visibilitychange", recordSessionActivity);
+      window.clearInterval(intervalId);
+    };
+  }, [
+    embeddedWorkspace,
+    isSupabaseConfigured,
+    securitySettings.allowedEmailDomain,
+    securitySettings.sessionIdleTimeoutMinutes,
+    session,
+  ]);
 
   useEffect(() => {
     if (!embeddedWorkspace) {
@@ -485,20 +618,19 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
       return;
     }
 
-    Promise.all([
-      listDocuments(),
-      listLawVersions(),
-      listComparisonRuns(),
-      listWorkspaceFavorites(),
-      listReviewExecutionHistory(),
-    ])
-      .then(([documentItems, lawVersionItems, comparisonItems, favoriteItems, reviewHistoryItems]) => {
-        const savedSelection = readWorkspaceSelection(sessionUserId);
+    let cancelled = false;
+    const savedSelection = readWorkspaceSelection(sessionUserId);
+
+    const documentsLoadStartedAt = performance.now();
+
+    void listDocuments()
+      .then((documentItems) => {
+        if (cancelled) {
+          return;
+        }
+        const documentLoadDurationMs = Math.round(performance.now() - documentsLoadStartedAt);
+        console.info(`[bootstrap] listDocuments loaded ${documentItems.length} documents in ${documentLoadDurationMs}ms`);
         setDocuments(documentItems);
-        setLawVersions(lawVersionItems);
-        setComparisonRuns(comparisonItems);
-        setWorkspaceFavorites(favoriteItems);
-        setReviewExecutionHistory(reviewHistoryItems);
         setSelectedDocumentId((current) => {
           const nextSelectedId =
             workspaceSelectionHydrated && current
@@ -523,41 +655,90 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
             documentItems,
           ),
         );
+      })
+      .catch((error: Error) => {
+        if (cancelled) {
+          return;
+        }
+        const documentLoadDurationMs = Math.round(performance.now() - documentsLoadStartedAt);
+        console.error(`[bootstrap] listDocuments failed after ${documentLoadDurationMs}ms: ${error.message}`);
+        setAppNotice({
+          tone: "danger",
+          label: "문서 목록 로드 오류",
+          title: "문서 목록을 불러오지 못했습니다.",
+          detail: `${error.message}\n문서 목록 로드 시간: ${documentLoadDurationMs}ms`,
+          actions: ["인증 상태를 확인하세요.", "Supabase 연결과 문서 테이블 상태를 확인하세요."],
+          debug: [`document list bootstrap error=${error.message}`, `document list load=${documentLoadDurationMs}ms`],
+        });
+      });
+
+    const bootstrapLoadStartedAt = performance.now();
+
+    void Promise.allSettled([
+      listLawVersions(),
+      listComparisonRuns(),
+      listWorkspaceFavorites(),
+      listReviewExecutionHistory(),
+    ]).then((results) => {
+      if (cancelled) {
+        return;
+      }
+
+      const [lawVersionsResult, comparisonRunsResult, favoritesResult, reviewHistoryResult] = results;
+      const bootstrapErrors: string[] = [];
+
+      if (lawVersionsResult.status === "fulfilled") {
+        setLawVersions(lawVersionsResult.value);
         setSelectedLawVersionIds((current) =>
           filterExistingIds(
             workspaceSelectionHydrated ? current : (savedSelection?.lawVersionIds ?? []),
-            lawVersionItems,
+            lawVersionsResult.value,
           ),
         );
+      } else {
+        bootstrapErrors.push(`법령 목록: ${lawVersionsResult.reason instanceof Error ? lawVersionsResult.reason.message : "로드 실패"}`);
+      }
+
+      if (comparisonRunsResult.status === "fulfilled") {
+        setComparisonRuns(comparisonRunsResult.value);
         setSelectedComparisonRunId((current) =>
-          current && comparisonItems.some((item) => item.id === current) ? current : null,
+          current && comparisonRunsResult.value.some((item) => item.id === current) ? current : null,
         );
-        setWorkspaceSelectionHydrated(true);
-      })
-      .catch((error: Error) => {
+      } else {
+        bootstrapErrors.push(`검토 결과: ${comparisonRunsResult.reason instanceof Error ? comparisonRunsResult.reason.message : "로드 실패"}`);
+      }
+
+      if (favoritesResult.status === "fulfilled") {
+        setWorkspaceFavorites(favoritesResult.value);
+      } else {
+        bootstrapErrors.push(`저장된 즐겨찾기: ${favoritesResult.reason instanceof Error ? favoritesResult.reason.message : "로드 실패"}`);
+      }
+
+      if (reviewHistoryResult.status === "fulfilled") {
+        setReviewExecutionHistory(reviewHistoryResult.value);
+      } else {
+        bootstrapErrors.push(`실행 이력: ${reviewHistoryResult.reason instanceof Error ? reviewHistoryResult.reason.message : "로드 실패"}`);
+      }
+
+      setWorkspaceSelectionHydrated(true);
+
+      if (bootstrapErrors.length > 0) {
+        const bootstrapLoadDurationMs = Math.round(performance.now() - bootstrapLoadStartedAt);
         setAppNotice({
-          tone: "danger",
-          label: "데이터 로드 오류",
-          title: "작업 공간 데이터를 불러오지 못했습니다.",
-          detail: error.message,
-          actions: ["인증 상태를 확인하세요.", "Supabase 테이블과 뷰가 배포되어 있는지 확인하세요."],
-          debug: [`workspace bootstrap error=${error.message}`],
+          tone: "warning",
+          label: "부분 로드 오류",
+          title: "일부 작업 공간 데이터만 불러왔습니다.",
+          detail: `${bootstrapErrors.join("\n")}\n추가 데이터 로드 시간: ${bootstrapLoadDurationMs}ms`,
+          actions: ["문서 목록은 사용할 수 있습니다.", "필요하면 새로고침 후 다시 확인하세요."],
+          debug: [...bootstrapErrors, `bootstrap tail load=${bootstrapLoadDurationMs}ms`],
         });
-      })
-      .finally(() => undefined);
-  }, [sessionUserId, isSupabaseConfigured, workspaceSelectionHydrated]);
+      }
+    });
 
-  useEffect(() => {
-    if (!sessionUserId || documents.length === 0 || isReparsingAllDocuments) {
-      return;
-    }
-
-    if (readDocumentParserReparseVersion(sessionUserId) === DOCUMENT_PARSER_REPARSE_VERSION) {
-      return;
-    }
-
-    void handleReparseAllDocuments({ automatic: true });
-  }, [sessionUserId, documents, isReparsingAllDocuments]);
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionUserId, isSupabaseConfigured]);
 
   useEffect(() => {
     const hasSelectionContext =
@@ -905,6 +1086,104 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
       }
     };
   }, [openAiSettings, openAiSettingsHydrated, session?.access_token]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    if (!session?.access_token) {
+      securitySettingsDirtyRef.current = false;
+      setSecuritySettings(DEFAULT_SECURITY_SETTINGS);
+      setSecuritySettingsHydrated(true);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    setSecuritySettingsHydrated(false);
+    getPolicySecuritySettings(DEFAULT_SECURITY_SETTINGS)
+      .then((settings) => {
+        if (cancelled) {
+          return;
+        }
+        securitySettingsDirtyRef.current = false;
+        setSecuritySettings(settings);
+        setSecuritySettingsHydrated(true);
+      })
+      .catch(() => {
+        if (cancelled) {
+          return;
+        }
+        securitySettingsDirtyRef.current = false;
+        setSecuritySettings(DEFAULT_SECURITY_SETTINGS);
+        setSecuritySettingsHydrated(true);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [session?.access_token]);
+
+  useEffect(() => {
+    if (!securitySettingsHydrated || !session?.access_token) {
+      return;
+    }
+
+    if (!securitySettingsDirtyRef.current) {
+      return;
+    }
+
+    if (securitySettingsSaveTimerRef.current !== null) {
+      window.clearTimeout(securitySettingsSaveTimerRef.current);
+    }
+
+    const requestId = securitySettingsSaveRequestIdRef.current + 1;
+    securitySettingsSaveRequestIdRef.current = requestId;
+    securitySettingsSaveTimerRef.current = window.setTimeout(() => {
+      void savePolicySecuritySettings(securitySettings, DEFAULT_SECURITY_SETTINGS)
+        .then((savedSettings) => {
+          if (securitySettingsSaveRequestIdRef.current === requestId) {
+            securitySettingsDirtyRef.current = false;
+            setSecuritySettings(savedSettings);
+            setAppNotice({
+              tone: "success",
+              label: "설정 저장",
+              title: "인증/세션 정책을 자동 저장했습니다.",
+              detail: `허용 도메인: ${savedSettings.allowedEmailDomain}, 세션 타임아웃: ${savedSettings.sessionIdleTimeoutMinutes}분`,
+            });
+          }
+        })
+        .catch((error) => {
+          setAppNotice({
+            tone: "danger",
+            label: "설정 저장 실패",
+            title: "인증/세션 정책을 저장하지 못했습니다.",
+            detail: error instanceof Error ? error.message : "잠시 후 다시 시도하세요.",
+          });
+        });
+    }, 3000);
+
+    return () => {
+      if (securitySettingsSaveTimerRef.current !== null) {
+        window.clearTimeout(securitySettingsSaveTimerRef.current);
+        securitySettingsSaveTimerRef.current = null;
+      }
+    };
+  }, [securitySettings, securitySettingsHydrated, session?.access_token]);
+
+  useEffect(() => {
+    if (!session?.user.email || !securitySettingsHydrated || embeddedWorkspace) {
+      return;
+    }
+
+    if (!isAllowedEmailDomain(session.user.email)) {
+      void rejectDisallowedSession(session.user.email);
+    }
+  }, [
+    embeddedWorkspace,
+    securitySettings.allowedEmailDomain,
+    securitySettingsHydrated,
+    session?.user.email,
+  ]);
 
   async function handleUpload(file: File, title: string, description: string) {
     setAppNotice({
@@ -1497,6 +1776,7 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
 
     if (selectedLawVersionIds.length === 0) {
       setAnalysisRequestKey((current) => current + 1);
+      let reviewHistorySaveWarning: string | null = null;
       try {
         const savedHistoryEntry = await saveReviewExecutionHistoryEntry({
           reviewerEmail: reviewHistoryBase.reviewerEmail,
@@ -1508,18 +1788,19 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
         setPendingAiOnlyReviewHistoryId(savedHistoryEntry.id);
         setReviewExecutionHistory((current) => [savedHistoryEntry, ...current].slice(0, 50));
       } catch (error) {
-        setAppNotice({
-          tone: "warning",
-          label: "이력 저장 실패",
-          title: "검토 실행 이력을 데이터베이스에 저장하지 못했습니다.",
-          detail: error instanceof Error ? error.message : "검토는 계속 진행되지만 이력 관리에는 표시되지 않을 수 있습니다.",
-        });
+        reviewHistorySaveWarning =
+          error instanceof Error
+            ? `검토 실행 이력 저장 실패: ${error.message}`
+            : "검토 실행 이력을 데이터베이스에 저장하지 못했습니다.";
       }
       setAppNotice({
-        tone: "info",
+        tone: reviewHistorySaveWarning ? "warning" : "info",
         label: "검토 실행 중",
         title: `비교 대상 정책·지침 ${selectedDocuments.length}건과 기준 문서 ${selectedReferenceDocuments.length}건의 AI 검토를 진행 중입니다.`,
-        detail: "법령 없이 문서 간 갭 분석만 순차 실행합니다.",
+        detail: [
+          "법령 없이 문서 간 갭 분석만 순차 실행합니다.",
+          reviewHistorySaveWarning,
+        ].filter(Boolean).join("\n\n"),
         actions: ["하단 진행 박스에서 1단계, 2단계, 3단계 진행 상태를 확인하세요."],
         debug: [`target_count=${selectedDocuments.length}`, `reference_count=${selectedReferenceDocuments.length}`, "law_count=0"],
       });
@@ -1561,6 +1842,7 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
       const comparisonRunIds = results
         .map((item) => item?.data?.comparisonRunId)
         .filter((value): value is string => typeof value === "string");
+      let reviewHistorySaveWarning: string | null = null;
       try {
         const savedHistoryEntry = await saveReviewExecutionHistoryEntry({
           reviewerEmail: reviewHistoryBase.reviewerEmail,
@@ -1572,12 +1854,10 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
         setPendingAiOnlyReviewHistoryId(null);
         setReviewExecutionHistory((current) => [savedHistoryEntry, ...current].slice(0, 50));
       } catch (error) {
-        setAppNotice({
-          tone: "warning",
-          label: "이력 저장 실패",
-          title: "검토 실행 이력을 데이터베이스에 저장하지 못했습니다.",
-          detail: error instanceof Error ? error.message : "비교 결과는 생성됐지만 이력 관리에는 표시되지 않을 수 있습니다.",
-        });
+        reviewHistorySaveWarning =
+          error instanceof Error
+            ? `검토 실행 이력 저장 실패: ${error.message}`
+            : "검토 실행 이력을 데이터베이스에 저장하지 못했습니다.";
       }
       const comparisonRunId =
         results[0]?.data?.comparisonRunId ??
@@ -1585,10 +1865,13 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
         null;
       setSelectedComparisonRunId(comparisonRunId);
       setAppNotice({
-        tone: "success",
+        tone: reviewHistorySaveWarning ? "warning" : "success",
         label: "비교 완료",
         title: `비교 대상 정책·지침 ${selectedDocuments.length}건, 기준 문서 ${selectedReferenceDocuments.length}건, 기준 법률 ${selectedLawVersionIds.length}건의 결정론 비교가 완료되었습니다.`,
-        detail: "AI 3단계 리포트와 비교 결과를 함께 검토할 수 있습니다.",
+        detail: [
+          "AI 3단계 리포트와 비교 결과를 함께 검토할 수 있습니다.",
+          reviewHistorySaveWarning,
+        ].filter(Boolean).join("\n\n"),
         actions: ["하단 비교 검토 패널에서 비교 대상 정리, 기준 정리, 최종 비교 리포트를 확인하세요."],
         debug: [
           `comparison_runs=${comparisonItems.length}`,
@@ -1860,34 +2143,37 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
   const workspaceNavigationItems: {
     id: WorkspaceSection;
     label: string;
+    icon: string;
   }[] = [
     {
       id: "dashboard",
       label: "대시보드",
+      icon: "⌂",
     },
     {
       id: "documents",
       label: "문서 관리",
+      icon: "▤",
     },
     {
       id: "comparison",
       label: "비교 설정",
+      icon: "⇄",
     },
     {
       id: "results",
       label: "검토 결과",
+      icon: "✓",
     },
     {
       id: "history",
-      label: "이력 관리",
-    },
-    {
-      id: "aiHistory",
-      label: "AI 리포트 이력",
+      label: "검토 이력",
+      icon: "◷",
     },
     {
       id: "settings",
       label: "설정",
+      icon: "⚙",
     },
   ];
   const activeWorkspaceMeta = getWorkspaceSectionMeta(activeWorkspaceSection);
@@ -1954,16 +2240,40 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
   const dashboardRecentLaws = dashboardLawDisplayItems.slice(0, 3);
   const dashboardRecentRuns = reviewExecutionHistory.slice(0, 3);
   const dashboardDocumentSectionCount = dashboardPolicyDocuments.reduce((sum, item) => sum + item.section_count, 0);
+  const reviewHistoryTotalPages = Math.max(1, Math.ceil(reviewExecutionHistory.length / REVIEW_HISTORY_PAGE_SIZE));
+  const reviewHistoryCurrentPage = Math.min(reviewHistoryPage, reviewHistoryTotalPages);
+  const reviewHistoryPageEntries = reviewExecutionHistory.slice(
+    (reviewHistoryCurrentPage - 1) * REVIEW_HISTORY_PAGE_SIZE,
+    reviewHistoryCurrentPage * REVIEW_HISTORY_PAGE_SIZE,
+  );
 
   return (
     <div className={`app-shell ${showWorkspaceNavigation ? "" : "login-shell"}`.trim()}>
       <div className="app-frame">
         <div className="app-main-column">
-          <div className={`workspace-shell ${showWorkspaceNavigation ? "" : "no-sidebar"}`.trim()}>
+          <div
+            className={`workspace-shell ${showWorkspaceNavigation ? "" : "no-sidebar"} ${
+              isWorkspaceSidebarCollapsed ? "workspace-shell-sidebar-collapsed" : ""
+            }`.trim()}
+          >
             {showWorkspaceNavigation ? (
-              <aside className="workspace-sidebar" aria-label="작업 탐색">
+              <aside
+                className={`workspace-sidebar ${
+                  isWorkspaceSidebarCollapsed ? "workspace-sidebar-collapsed" : ""
+                }`.trim()}
+                aria-label="작업 탐색"
+              >
                 <div className="workspace-sidebar-title">
-                  <strong>준거성 검토 시스템</strong>
+                  <strong>{isWorkspaceSidebarCollapsed ? "CR" : "준거성 검토 시스템"}</strong>
+                  <button
+                    type="button"
+                    className="workspace-sidebar-toggle"
+                    aria-label={isWorkspaceSidebarCollapsed ? "사이드 메뉴 펼치기" : "사이드 메뉴 접기"}
+                    title={isWorkspaceSidebarCollapsed ? "사이드 메뉴 펼치기" : "사이드 메뉴 접기"}
+                    onClick={() => setIsWorkspaceSidebarCollapsed((current) => !current)}
+                  >
+                    {isWorkspaceSidebarCollapsed ? "›" : "‹"}
+                  </button>
                 </div>
                 <nav className="workspace-nav">
                   {workspaceNavigationItems.map((item) => (
@@ -1971,6 +2281,9 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
                       key={item.id}
                       type="button"
                       className={`workspace-nav-item ${activeWorkspaceSection === item.id ? "is-active" : ""}`}
+                      aria-label={item.label}
+                      title={item.label}
+                      data-label={item.label}
                       onClick={() => {
                         setActiveWorkspaceSection(item.id);
                         if (item.id === "documents") {
@@ -1978,31 +2291,33 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
                         }
                       }}
                     >
+                      <span className="workspace-nav-icon" aria-hidden="true">
+                        {item.icon}
+                      </span>
                       <strong>{item.label}</strong>
                     </button>
                   ))}
                 </nav>
+                <div className="workspace-auth-inline" aria-label="로그인 상태">
+                  <span className="workspace-auth-inline-label">로그인 계정</span>
+                  <strong>{session?.user.email ?? "세션 없음"}</strong>
+                  <button
+                    type="button"
+                    className="workspace-auth-inline-button"
+                    onClick={handleHeaderSignOut}
+                  >
+                    로그아웃
+                  </button>
+                </div>
               </aside>
             ) : null}
 
-            <div className="workspace-content">
-              {showWorkspaceNavigation ? (
-                <div className="workspace-auth-row">
-                  <div className="workspace-auth-inline" aria-label="로그인 상태">
-                    <span className="workspace-auth-inline-label">로그인 계정:</span>
-                    <strong>{session?.user.email ?? "세션 없음"}</strong>
-                    <button
-                      type="button"
-                      className="workspace-auth-inline-button"
-                      onClick={handleHeaderSignOut}
-                    >
-                      로그아웃
-                    </button>
-                  </div>
-                </div>
-              ) : null}
-
-              {showWorkspaceNavigation && activeWorkspaceSection !== "dashboard" ? (
+            <div
+              className={`workspace-content ${
+                activeWorkspaceSection === "history" ? "workspace-content-history" : ""
+              }`.trim()}
+            >
+              {showWorkspaceNavigation && !["dashboard", "history"].includes(activeWorkspaceSection) ? (
                 <div className="workspace-hero-row">
                   <header
                     className={`hero ${activeWorkspaceSection === "documents" ? "hero-documents" : ""}`.trim()}
@@ -2038,7 +2353,11 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
               ) : null}
 
               <main
-                className={`workspace-stack ${showWorkspaceNavigation && activeWorkspaceSection === "dashboard" ? "workspace-stack-no-hero" : ""}`.trim()}
+                className={`workspace-stack ${
+                  showWorkspaceNavigation && ["dashboard", "history"].includes(activeWorkspaceSection)
+                    ? "workspace-stack-no-hero"
+                    : ""
+                } ${activeWorkspaceSection === "history" ? "workspace-stack-history" : ""}`.trim()}
               >
                 {!showWorkspaceNavigation && !isSupabaseConfigured ? null : !isSupabaseConfigured ? (
                   <section className="panel">
@@ -2059,7 +2378,10 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
                 {!showWorkspaceNavigation ? (
                   <section className="panel panel-equal-height workspace-body-card workspace-login-page">
                     <div className="workspace-login-layout">
-                      <AuthPanel session={session} allowedDomain={ALLOWED_EMAIL_DOMAIN} />
+                      <AuthPanel
+                        session={session}
+                        allowedDomain={normalizeAllowedEmailDomain(securitySettings.allowedEmailDomain)}
+                      />
                     </div>
                   </section>
                 ) : null}
@@ -2403,31 +2725,47 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
 
                 {activeWorkspaceSection === "history" ? (
                   <div className="stack">
-                    <section className="panel panel-wide workspace-body-card">
-                      <div className="section-header workspace-section-header">
-                        <h2>이력 관리</h2>
-                        <p>검토 실행 시점의 비교 대상, 기준, 일시, 검토자를 실행 로그로 확인합니다.</p>
+                    <section className="panel workspace-body-card workspace-history-card">
+                      <div className="workspace-history-heading">
+                        <div>
+                          <span>History</span>
+                          <h2>검토 이력</h2>
+                        </div>
+                        <div className="workspace-history-counts" aria-label="검토 이력 요약">
+                          <strong>{reviewExecutionHistory.length}</strong>
+                          <span>실행 기록</span>
+                          <strong>{reviewExecutionHistory.filter(hasAiOnlyHistoryResult).length}</strong>
+                          <span>AI 리포트</span>
+                        </div>
                       </div>
-                      {reviewExecutionHistory.length ? (
-                        <div className="comparison-table-wrap comparison-history-table-wrap">
-                          <table className="comparison-data-table comparison-history-table">
-                            <thead>
-                              <tr>
-                                <th>비교 대상</th>
-                                <th>기준</th>
-                                <th>일시</th>
-                                <th>검토자</th>
-                                <th>결과</th>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {reviewExecutionHistory.map((entry) => (
-                                <tr key={entry.id}>
-                                  <td>{joinListForDisplay(entry.targetTitles)}</td>
-                                  <td>{joinListForDisplay(entry.referenceTitles)}</td>
-                                  <td>{formatSavedHistoryTimestamp(entry.createdAt)}</td>
-                                  <td>{entry.reviewerEmail}</td>
-                                  <td>
+                      <div className="workspace-history-split">
+                        <section className="workspace-history-section">
+                          <div className="compact-section-header">
+                            <h3>실행 기록</h3>
+                          </div>
+                          {reviewExecutionHistory.length ? (
+                            <div className="review-history-list">
+                              {reviewHistoryPageEntries.map((entry) => (
+                                <article key={entry.id} className="review-history-item">
+                                  <div className="review-history-main">
+                                    <strong>{formatHistoryTitle(entry.targetTitles)}</strong>
+                                    <p>{joinListForDisplay(entry.referenceTitles)}</p>
+                                  </div>
+                                  <dl className="review-history-meta">
+                                    <div>
+                                      <dt>기준</dt>
+                                      <dd>{entry.referenceTitles.length}건</dd>
+                                    </div>
+                                    <div>
+                                      <dt>일시</dt>
+                                      <dd>{formatSavedHistoryTimestamp(entry.createdAt)}</dd>
+                                    </div>
+                                    <div>
+                                      <dt>검토자</dt>
+                                      <dd>{entry.reviewerEmail}</dd>
+                                    </div>
+                                  </dl>
+                                  <div className="review-history-action">
                                     {hasDeterministicComparisonResult(entry) ? (
                                       <button
                                         type="button"
@@ -2440,72 +2778,95 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
                                         결과 보기
                                       </button>
                                     ) : hasAiOnlyHistoryResult(entry) ? (
-                                      <span className="history-status-badge history-status-badge-complete">
-                                        AI 리포트 완료
-                                      </span>
+                                      <button
+                                        type="button"
+                                        className="history-status-badge history-status-badge-complete history-status-button"
+                                        onClick={() => {
+                                          setAiHistoryLoadRequest({
+                                            requestId: Date.now(),
+                                            selectionSummary: getSelectionSummary(
+                                              entry.targetTitles.length,
+                                              entry.referenceTitles.length,
+                                              0,
+                                            ),
+                                            selectionCounts: {
+                                              leftDocumentCount: entry.targetTitles.length,
+                                              rightDocumentCount: entry.referenceTitles.length,
+                                              rightLawCount: 0,
+                                            },
+                                          });
+                                        }}
+                                      >
+                                        AI 리포트 열기
+                                      </button>
                                     ) : (
                                       <span className="history-status-badge history-status-badge-pending">
-                                        AI 비교 진행 중
+                                        진행 중
                                       </span>
                                     )}
-                                  </td>
-                                </tr>
+                                  </div>
+                                </article>
                               ))}
-                            </tbody>
-                          </table>
-                        </div>
-                      ) : (
-                        <div className="empty-state">
-                          <strong>검토 실행 이력이 없습니다.</strong>
-                          <p>비교 설정에서 검토 실행을 시작하면 이력이 이곳에 기록됩니다.</p>
-                        </div>
-                      )}
-                    </section>
-                    <section className="panel panel-wide workspace-body-card">
-                      <div className="section-header workspace-section-header">
-                        <h2>AI 리포트 이력</h2>
-                        <p>저장된 AI 비교 리포트를 다시 열거나 삭제합니다.</p>
+                              {reviewHistoryTotalPages > 1 ? (
+                                <div className="comparison-history-pagination review-history-pagination">
+                                  {Array.from({ length: reviewHistoryTotalPages }, (_, index) => index + 1).map(
+                                    (pageNumber) => (
+                                      <button
+                                        key={pageNumber}
+                                        type="button"
+                                        className={`button ghost comparison-history-page-button ${
+                                          pageNumber === reviewHistoryCurrentPage ? "is-active" : ""
+                                        }`}
+                                        onClick={() => setReviewHistoryPage(pageNumber)}
+                                      >
+                                        {pageNumber}
+                                      </button>
+                                    ),
+                                  )}
+                                </div>
+                              ) : null}
+                            </div>
+                          ) : (
+                            <div className="empty-state">
+                              <strong>검토 실행 이력이 없습니다.</strong>
+                              <p>비교 설정에서 검토 실행을 시작하면 이력이 이곳에 기록됩니다.</p>
+                            </div>
+                          )}
+                        </section>
+                        <section className="workspace-history-section">
+                          <div className="compact-section-header">
+                            <h3>저장된 AI 리포트</h3>
+                          </div>
+                          <ComparisonReviewPanel
+                            comparisonRunId={selectedComparisonRunId}
+                            comparisonRunIds={activeComparisonRunIds}
+                            selectedDocumentIds={comparisonTargetDocumentIds}
+                            referenceDocumentIds={comparisonReferenceDocumentIds}
+                            selectedLawVersionIds={selectedLawVersionIds}
+                            openAiSettings={openAiSettings}
+                            viewMode="history"
+                            autoLoadHistoryRequest={aiHistoryLoadRequest}
+                            setStatus={setStatus}
+                            onOverviewChange={setComparisonOverview}
+                            analysisState={comparisonAnalysisState}
+                          />
+                        </section>
                       </div>
-                      <ComparisonReviewPanel
-                        comparisonRunId={selectedComparisonRunId}
-                        comparisonRunIds={activeComparisonRunIds}
-                        selectedDocumentIds={comparisonTargetDocumentIds}
-                        referenceDocumentIds={comparisonReferenceDocumentIds}
-                        selectedLawVersionIds={selectedLawVersionIds}
-                        openAiSettings={openAiSettings}
-                        viewMode="history"
-                        setStatus={setStatus}
-                        onOverviewChange={setComparisonOverview}
-                        analysisState={comparisonAnalysisState}
-                      />
                     </section>
                   </div>
-                ) : null}
-
-                {activeWorkspaceSection === "aiHistory" ? (
-                  <section className="panel panel-wide workspace-body-card">
-                    <div className="section-header workspace-section-header">
-                      <h2>AI 리포트 이력</h2>
-                      <p>저장된 AI 비교 리포트를 다시 열거나 삭제합니다.</p>
-                    </div>
-                    <ComparisonReviewPanel
-                      comparisonRunId={selectedComparisonRunId}
-                      comparisonRunIds={activeComparisonRunIds}
-                      selectedDocumentIds={comparisonTargetDocumentIds}
-                      referenceDocumentIds={comparisonReferenceDocumentIds}
-                      selectedLawVersionIds={selectedLawVersionIds}
-                      openAiSettings={openAiSettings}
-                      viewMode="history"
-                      setStatus={setStatus}
-                      onOverviewChange={setComparisonOverview}
-                      analysisState={comparisonAnalysisState}
-                    />
-                  </section>
                 ) : null}
 
                 {activeWorkspaceSection === "settings" ? (
                   <section className="workspace-body-plain workspace-results-body">
                     <PromptSettingsPanel
+                      securitySettings={securitySettings}
+                      onSecuritySettingChange={(field, value) => {
+                        securitySettingsDirtyRef.current = true;
+                        setSecuritySettings((current) => ({
+                          ...current,
+                          [field]: value,
+                        }));
+                      }}
                       activePromptSlotByStage={activePromptSlotByStage}
                       onPromptSlotChange={(stage, index) => {
                         setActivePromptSlotByStage((current) => ({
@@ -2560,6 +2921,9 @@ function inferNoticeTone(message: string): NoticeTone {
 }
 
 function inferNoticeDetail(message: string) {
+  if (/Failed to fetch/.test(message)) {
+    return "브라우저가 Supabase Edge Function에 일시적으로 연결하지 못했습니다. 네트워크, 세션, 웹뷰 연결 상태를 확인한 뒤 다시 시도하세요.";
+  }
   if (/선택하세요/.test(message)) {
     return "필수 입력이 없어서 다음 단계로 진행하지 못했습니다.";
   }
@@ -2573,6 +2937,12 @@ function inferNoticeDetail(message: string) {
 }
 
 function inferNoticeActions(message: string) {
+  if (/Failed to fetch/.test(message)) {
+    return [
+      "잠시 후 다시 시도하세요.",
+      "같은 오류가 반복되면 다시 로그인한 뒤 재실행하세요.",
+    ];
+  }
   if (/선택하세요/.test(message)) {
     return ["누락된 입력이나 선택 항목을 먼저 채우세요."];
   }
@@ -2580,6 +2950,22 @@ function inferNoticeActions(message: string) {
     return ["세부 오류 메시지를 확인하고 다시 시도하세요."];
   }
   return undefined;
+}
+
+function isTransientFetchStatus(message: string) {
+  return /Failed to fetch|Edge Function.*연결|Supabase Edge Function|네트워크 연결 또는 Supabase Function 접근/i.test(
+    message,
+  );
+}
+
+function normalizeAllowedEmailDomain(domain: string) {
+  return domain.trim().toLowerCase().replace(/^@/u, "") || DEFAULT_SECURITY_SETTINGS.allowedEmailDomain;
+}
+
+function normalizeSessionIdleTimeoutMinutes(minutes: number) {
+  return Number.isFinite(minutes)
+    ? Math.min(1440, Math.max(1, Math.round(minutes)))
+    : DEFAULT_SECURITY_SETTINGS.sessionIdleTimeoutMinutes;
 }
 
 function getWorkspaceSelectionStorageKey(userId: string) {
@@ -2767,6 +3153,18 @@ function joinListForDisplay(values: string[]) {
   return values.length ? values.join(", ") : "-";
 }
 
+function formatHistoryTitle(values: string[]) {
+  if (values.length === 0) {
+    return "-";
+  }
+
+  if (values.length === 1) {
+    return values[0];
+  }
+
+  return `${values[0]} 외 ${values.length - 1}건`;
+}
+
 function getLatestRegisteredLaws(lawVersions: LawVersionSummary[]) {
   const latestBySourceId = new Map<string, LawVersionSummary>();
 
@@ -2952,17 +3350,9 @@ function getWorkspaceSectionMeta(section: WorkspaceSection) {
 
   if (section === "history") {
     return {
-      kicker: "이력 관리",
-      title: "이력 관리",
-      description: "검토 실행 시점의 비교 대상, 기준, 일시, 검토자를 실행 이력으로 확인합니다.",
-    };
-  }
-
-  if (section === "aiHistory") {
-    return {
-      kicker: "AI 리포트 이력",
-      title: "AI 리포트 이력",
-      description: "저장한 AI 비교 리포트를 다시 열거나 삭제합니다.",
+      kicker: "검토 이력",
+      title: "검토 이력",
+      description: "검토 실행 기록을 시간순으로 확인합니다.",
     };
   }
 

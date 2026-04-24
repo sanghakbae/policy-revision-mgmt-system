@@ -2,11 +2,17 @@ import type {
   AiRevisionPromptOverrides,
   OpenAiSettings,
   PromptSlotIndex,
+  SecuritySettings,
 } from "../types";
 import { COMPARISON_REPORT_EXAMPLE } from "../../shared/analysisPrompts";
 
 interface PromptSettingsPanelProps {
   openAiSettings: OpenAiSettings;
+  securitySettings: SecuritySettings;
+  onSecuritySettingChange: <Field extends keyof SecuritySettings>(
+    field: Field,
+    value: SecuritySettings[Field],
+  ) => void;
   onOpenAiSettingChange: (field: keyof OpenAiSettings, value: string) => void;
   promptOverrides: AiRevisionPromptOverrides;
   onPromptChange: (
@@ -130,6 +136,51 @@ export function PromptSettingsPanel(input: PromptSettingsPanelProps) {
           <p className="helper-text">
             입력한 키와 모델은 로그인한 사용자 기준으로 저장되며, 비교 요청 시 Edge Function으로 전달됩니다.
           </p>
+        </div>
+      </section>
+
+      <section className="review-column comparison-source-column comparison-review-stage-frame comparison-report-block comparison-openai-settings-block">
+        <div className="section-header comparison-frame-header comparison-stage-frame-header">
+          <div className="comparison-stage-frame-head">
+            <h3>인증/세션 정책</h3>
+            <span className="comparison-report-stage-step">고정 정책</span>
+          </div>
+          <p>Google 로그인 허용 범위와 세션 유휴 만료 시간을 관리합니다.</p>
+        </div>
+        <div className="comparison-auth-policy-grid">
+          <div className="info-card comparison-auth-policy-card">
+            <label className="comparison-auth-policy-row">
+              <span>허용 Google Workspace 도메인:</span>
+              <input
+                type="text"
+                value={input.securitySettings.allowedEmailDomain}
+                onChange={(event) => input.onSecuritySettingChange("allowedEmailDomain", event.target.value)}
+                placeholder="muhayu.com"
+                autoComplete="off"
+                spellCheck={false}
+              />
+            </label>
+            <p className="helper-text">이 도메인이 아닌 Google 계정은 로그인 직후 자동 로그아웃됩니다.</p>
+          </div>
+          <div className="info-card comparison-auth-policy-card">
+            <label className="comparison-auth-policy-row">
+              <span>세션 타임아웃:</span>
+              <input
+                type="number"
+                min={1}
+                max={1440}
+                value={input.securitySettings.sessionIdleTimeoutMinutes}
+                onChange={(event) =>
+                  input.onSecuritySettingChange(
+                    "sessionIdleTimeoutMinutes",
+                    Number(event.target.value) || 1,
+                  )
+                }
+              />
+              <strong>분</strong>
+            </label>
+            <p className="helper-text">클릭, 키보드 입력, 스크롤 등 사용 활동이 있으면 만료 시간이 다시 연장됩니다.</p>
+          </div>
         </div>
       </section>
     </section>

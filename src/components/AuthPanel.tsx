@@ -53,8 +53,8 @@ export function AuthPanel({ session, allowedDomain = null }: AuthPanelProps) {
   return (
     <section className="auth-panel">
       <div className="auth-panel-brand">
-        <span className="auth-panel-brand-mark">PR</span>
-        <span className="auth-panel-brand-text">policy managed</span>
+        <span className="auth-panel-brand-mark">CR</span>
+        <span className="auth-panel-brand-text">Compliance Review System</span>
       </div>
 
       <div className="section-header auth-panel-header">

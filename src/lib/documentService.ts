@@ -23,6 +23,7 @@ import type {
   LawVersionSummary,
   OpenAiSettings,
   ReviewExecutionHistoryEntry,
+  SecuritySettings,
   WorkspaceFavorite,
   WorkspaceSelectionSnapshot,
 } from "../types";
@@ -58,6 +59,11 @@ interface WorkspaceFavoriteRow {
 interface PolicyUserSettingsRow {
   openai_api_key: string | null;
   openai_model: string | null;
+}
+
+interface PolicySecuritySettingsRow {
+  allowed_email_domain: string | null;
+  session_idle_timeout_minutes: number | null;
 }
 
 interface ReviewExecutionHistoryRow {
@@ -742,7 +748,7 @@ export async function listDocuments(): Promise<DocumentSummary[]> {
   const { data, error } = await supabase
     .from("policy_documents")
     .select(
-      "id, title, document_type, created_at, policy_document_versions(id, version_number, created_at, raw_text, policy_document_sections(count))",
+      "id, title, document_type, created_at, policy_document_versions(id, version_number, created_at, policy_document_sections(count))",
     )
     .order("created_at", { ascending: false });
 
@@ -754,7 +760,6 @@ export async function listDocuments(): Promise<DocumentSummary[]> {
     const latestVersion = [...(row.policy_document_versions ?? [])].sort(
       (left, right) => right.version_number - left.version_number,
     )[0];
-    const metadata = deriveDocumentMetadata(latestVersion?.raw_text ?? "");
 
     return {
       id: row.id,
@@ -763,7 +768,7 @@ export async function listDocuments(): Promise<DocumentSummary[]> {
       version_number: latestVersion?.version_number ?? 0,
       version_id: latestVersion?.id,
       created_at: latestVersion?.created_at ?? row.created_at,
-      effective_date: metadata.revisionDate,
+      effective_date: null,
       section_count: latestVersion?.policy_document_sections?.[0]?.count ?? 0,
     };
   }).sort(compareDocumentSummaryForList);
@@ -1070,6 +1075,66 @@ export async function savePolicyUserOpenAiSettings(settings: OpenAiSettings, def
   if (error) {
     throw new Error(buildAuthDebugMessage(`openai settings save failed: ${error.message}`, session));
   }
+}
+
+export async function getPolicySecuritySettings(defaultSettings: SecuritySettings): Promise<SecuritySettings> {
+  const session = await ensureAuthenticatedSession();
+  const currentUser = await ensureAuthenticatedUser(session.access_token);
+  const supabase = getSupabaseClient();
+  const { data, error } = await supabase
+    .from("policy_security_settings")
+    .select("allowed_email_domain, session_idle_timeout_minutes")
+    .eq("owner_user_id", currentUser.id)
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(buildAuthDebugMessage(`security settings load failed: ${error.message}`, session));
+  }
+
+  const row = (data ?? null) as PolicySecuritySettingsRow | null;
+  return normalizeSecuritySettings(
+    {
+      allowedEmailDomain: row?.allowed_email_domain ?? defaultSettings.allowedEmailDomain,
+      sessionIdleTimeoutMinutes:
+        row?.session_idle_timeout_minutes ?? defaultSettings.sessionIdleTimeoutMinutes,
+    },
+    defaultSettings,
+  );
+}
+
+export async function savePolicySecuritySettings(settings: SecuritySettings, defaultSettings: SecuritySettings) {
+  const session = await ensureAuthenticatedSession();
+  const currentUser = await ensureAuthenticatedUser(session.access_token);
+  const normalizedSettings = normalizeSecuritySettings(settings, defaultSettings);
+  const supabase = getSupabaseClient();
+  const { error } = await supabase
+    .from("policy_security_settings")
+    .upsert({
+      owner_user_id: currentUser.id,
+      allowed_email_domain: normalizedSettings.allowedEmailDomain,
+      session_idle_timeout_minutes: normalizedSettings.sessionIdleTimeoutMinutes,
+      updated_at: new Date().toISOString(),
+    }, { onConflict: "owner_user_id" });
+
+  if (error) {
+    throw new Error(buildAuthDebugMessage(`security settings save failed: ${error.message}`, session));
+  }
+
+  return normalizedSettings;
+}
+
+function normalizeSecuritySettings(settings: SecuritySettings, defaultSettings: SecuritySettings): SecuritySettings {
+  const allowedEmailDomain =
+    settings.allowedEmailDomain.trim().toLowerCase().replace(/^@/u, "") ||
+    defaultSettings.allowedEmailDomain;
+  const sessionIdleTimeoutMinutes = Number.isFinite(settings.sessionIdleTimeoutMinutes)
+    ? Math.min(1440, Math.max(1, Math.round(settings.sessionIdleTimeoutMinutes)))
+    : defaultSettings.sessionIdleTimeoutMinutes;
+
+  return {
+    allowedEmailDomain,
+    sessionIdleTimeoutMinutes,
+  };
 }
 
 export async function getDocumentDetail(
@@ -2141,15 +2206,21 @@ async function invokeEdgeFunctionHttp<TBody extends Record<string, unknown>>(
 
   let response: Response;
   try {
-    response = await fetch(`${supabaseUrl}/functions/v1/${functionName}`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        apikey: anonKey,
-        Authorization: `Bearer ${accessToken}`,
+    response = await fetchWithRetry(
+      `${supabaseUrl}/functions/v1/${functionName}`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          apikey: anonKey,
+          Authorization: `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify(body),
       },
-      body: JSON.stringify(body),
-    });
+      {
+        functionName,
+      },
+    );
   } catch (error) {
     const message =
       error instanceof Error && error.message
@@ -2159,7 +2230,7 @@ async function invokeEdgeFunctionHttp<TBody extends Record<string, unknown>>(
       data: null,
       error: new Error(
         message === "Failed to fetch"
-          ? "Failed to fetch: 네트워크 연결 또는 Supabase Function 접근에 실패했습니다."
+          ? `Failed to fetch: ${functionName} 호출 중 네트워크 연결 또는 Supabase Function 접근에 실패했습니다.`
           : message,
       ),
     };
@@ -2192,6 +2263,84 @@ async function invokeEdgeFunctionHttp<TBody extends Record<string, unknown>>(
     data,
     error: null,
   };
+}
+
+const DEFAULT_EDGE_FUNCTION_FETCH_TIMEOUT_MS = 90_000;
+const LONG_RUNNING_EDGE_FUNCTION_FETCH_TIMEOUT_MS = 185_000;
+const EDGE_FUNCTION_RETRY_DELAYS_MS = [800, 2_000, 5_000];
+
+async function fetchWithRetry(
+  input: RequestInfo | URL,
+  init: RequestInit,
+  options: {
+    functionName: string;
+  },
+) {
+  let lastError: unknown;
+  const maxAttempts = EDGE_FUNCTION_RETRY_DELAYS_MS.length + 1;
+  const timeoutMs = getEdgeFunctionFetchTimeoutMs(options.functionName);
+
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => {
+      controller.abort();
+    }, timeoutMs);
+
+    try {
+      return await fetch(input, {
+        ...init,
+        signal: controller.signal,
+      });
+    } catch (error) {
+      lastError = error;
+      if (isAbortError(error)) {
+        throw new Error(
+          `${options.functionName} 호출이 ${Math.round(timeoutMs / 1000)}초를 넘겨 중단되었습니다.`,
+        );
+      }
+      if (attempt === maxAttempts - 1 || !isRetriableFetchError(error)) {
+        throw error;
+      }
+      console.warn(
+        `[edge-function] ${options.functionName} fetch failed; retrying ${attempt + 1}/${maxAttempts - 1}`,
+        error,
+      );
+      await waitFor(EDGE_FUNCTION_RETRY_DELAYS_MS[attempt] ?? 1_000);
+    } finally {
+      window.clearTimeout(timeoutId);
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error("Failed to fetch");
+}
+
+function getEdgeFunctionFetchTimeoutMs(functionName: string) {
+  if (functionName === "analyze-selected-revisions") {
+    return LONG_RUNNING_EDGE_FUNCTION_FETCH_TIMEOUT_MS;
+  }
+
+  return DEFAULT_EDGE_FUNCTION_FETCH_TIMEOUT_MS;
+}
+
+function isRetriableFetchError(error: unknown) {
+  if (!(error instanceof Error)) {
+    return true;
+  }
+
+  return (
+    error.name === "TypeError" ||
+    /Failed to fetch|NetworkError|Load failed|The network connection was lost/i.test(error.message)
+  );
+}
+
+function isAbortError(error: unknown) {
+  return error instanceof Error && error.name === "AbortError";
+}
+
+function waitFor(milliseconds: number) {
+  return new Promise<void>((resolve) => {
+    window.setTimeout(resolve, milliseconds);
+  });
 }
 
 async function getFreshAuthenticatedSession() {
@@ -2541,9 +2690,15 @@ async function formatFunctionInvokeError(
     userId?: string;
   },
 ) {
+  const stageLabel = contextInfo?.stage ?? "unknown";
   const statusMessage = error.context?.status
     ? `HTTP ${error.context.status} ${error.context.statusText ?? ""}`.trim()
     : error.message || "함수 호출 중 오류가 발생했습니다.";
+
+  if (!error.context && /Failed to fetch/i.test(statusMessage)) {
+    return `${stageLabel} 호출 실패\n네트워크 연결 또는 Supabase Edge Function 접근에 실패했습니다.`;
+  }
+
   const debugPrefix = buildDebugPrefix(statusMessage, contextInfo);
   const authFailureSuffix = shouldInvalidateStoredSession(error)
     ? `\n안내: ${normalizeSupabaseAuthError("jwt")} 방금 저장된 로컬 세션은 초기화했습니다. 다시 로그인한 뒤 검토를 다시 실행하세요.`
