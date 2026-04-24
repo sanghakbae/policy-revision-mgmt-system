@@ -748,7 +748,7 @@ export async function listDocuments(): Promise<DocumentSummary[]> {
   const { data, error } = await supabase
     .from("policy_documents")
     .select(
-      "id, title, document_type, created_at, policy_document_versions(id, version_number, created_at, policy_document_sections(count))",
+      "id, title, document_type, created_at, policy_document_versions(id, version_number, created_at, raw_text, policy_document_sections(count))",
     )
     .order("created_at", { ascending: false });
 
@@ -760,6 +760,7 @@ export async function listDocuments(): Promise<DocumentSummary[]> {
     const latestVersion = [...(row.policy_document_versions ?? [])].sort(
       (left, right) => right.version_number - left.version_number,
     )[0];
+    const metadata = latestVersion?.raw_text ? deriveDocumentMetadata(latestVersion.raw_text) : null;
 
     return {
       id: row.id,
@@ -768,7 +769,7 @@ export async function listDocuments(): Promise<DocumentSummary[]> {
       version_number: latestVersion?.version_number ?? 0,
       version_id: latestVersion?.id,
       created_at: latestVersion?.created_at ?? row.created_at,
-      effective_date: null,
+      effective_date: metadata?.revisionDate ?? null,
       section_count: latestVersion?.policy_document_sections?.[0]?.count ?? 0,
     };
   }).sort(compareDocumentSummaryForList);
@@ -2779,7 +2780,7 @@ function deriveDocumentMetadata(rawText: string) {
       continue;
     }
 
-    const revisionMatch = normalized.match(/^개정\s*([0-9]{4}\.[0-9]{1,2}\.[0-9]{1,2}\.?)$/u);
+    const revisionMatch = normalized.match(/^(?:개정|시행일?)\s*[:：]?\s*([0-9]{4}\.[0-9]{1,2}\.[0-9]{1,2}\.?)$/u);
     if (!revisionDate && revisionMatch) {
       revisionDate = revisionMatch[1].replace(/\.$/u, "");
       documentNotes.push(line);

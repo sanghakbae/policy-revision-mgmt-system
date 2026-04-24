@@ -200,6 +200,7 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
     () => portalWorkspaceSection ?? readWorkspaceSection() ?? "dashboard",
   );
   const [isWorkspaceSidebarCollapsed, setIsWorkspaceSidebarCollapsed] = useState(false);
+  const [isDocumentsPanelCollapsed, setIsDocumentsPanelCollapsed] = useState(false);
   const [appNotice, setAppNoticeState] = useState<AppNotice | null>(null);
   const [comparisonOverview, setComparisonOverview] = useState<ComparisonReviewOverviewSnapshot | null>(null);
   const [comparisonAnalysisState, setComparisonAnalysisState] = useState<ComparisonReviewAnalysisState>(
@@ -2566,80 +2567,104 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
                 ) : null}
 
                 {activeWorkspaceSection === "documents" ? (
-                  <div className="review-shell workspace-documents-layout">
+                  <div
+                    className={`review-shell workspace-documents-layout ${
+                      isDocumentsPanelCollapsed ? "workspace-documents-layout-collapsed" : ""
+                    }`.trim()}
+                  >
                     <div className="workspace-documents-column">
-                      <section className="panel workspace-body-card workspace-documents-panel">
-                        <div className="section-header workspace-section-header">
-                          <div>
-                            <h2>문서 목록</h2>
-                            <p>문서 목록에서 선택한 문서를 오른쪽에서 구조와 본문으로 바로 검토할 수 있습니다.</p>
-                          </div>
-                          <div className="structured-editor-toolbar">
-                            <button
-                              type="button"
-                              className="button ghost structured-toolbar-button"
-                              onClick={() => {
-                                documentXlsxImportInputRef.current?.click();
-                              }}
-                              disabled={!session || !isSupabaseConfigured}
-                            >
-                              XLSX Import
-                            </button>
-                            <button
-                              type="button"
-                              className="button ghost structured-toolbar-button"
-                              onClick={() => {
-                                void handleExportDocumentsXlsx();
-                              }}
-                              disabled={documents.length === 0}
-                            >
-                              XLSX Export
-                            </button>
-                            <input
-                              ref={documentXlsxImportInputRef}
-                              type="file"
-                              accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                              className="visually-hidden"
-                              onChange={(event) => {
-                                const file = event.target.files?.[0];
-                                event.target.value = "";
-                                if (file) {
-                                  void handleImportDocumentsXlsx(file);
-                                }
-                              }}
+                      {isDocumentsPanelCollapsed ? (
+                        <button
+                          type="button"
+                          className="documents-panel-rail-toggle"
+                          aria-label="문서 목록 펼치기"
+                          title="문서 목록 펼치기"
+                          onClick={() => setIsDocumentsPanelCollapsed(false)}
+                        >
+                          <span>›</span>
+                          <strong>문서 목록</strong>
+                        </button>
+                      ) : (
+                        <>
+                          <section className="panel workspace-body-card workspace-documents-panel">
+                            <div className="section-header workspace-section-header">
+                              <div>
+                                <h2>문서 목록</h2>
+                                <p>문서 목록에서 선택한 문서를 오른쪽에서 구조와 본문으로 바로 검토할 수 있습니다.</p>
+                              </div>
+                              <div className="structured-editor-toolbar">
+                                <button
+                                  type="button"
+                                  className="button ghost structured-toolbar-button documents-panel-collapse-button"
+                                  aria-label="문서 목록 접기"
+                                  title="문서 목록 접기"
+                                  onClick={() => setIsDocumentsPanelCollapsed(true)}
+                                >
+                                  ‹
+                                </button>
+                                <button
+                                  type="button"
+                                  className="button ghost structured-toolbar-button"
+                                  onClick={() => {
+                                    documentXlsxImportInputRef.current?.click();
+                                  }}
+                                  disabled={!session || !isSupabaseConfigured}
+                                >
+                                  XLSX Import
+                                </button>
+                                <button
+                                  type="button"
+                                  className="button ghost structured-toolbar-button"
+                                  onClick={() => {
+                                    void handleExportDocumentsXlsx();
+                                  }}
+                                  disabled={documents.length === 0}
+                                >
+                                  XLSX Export
+                                </button>
+                                <input
+                                  ref={documentXlsxImportInputRef}
+                                  type="file"
+                                  accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                                  className="visually-hidden"
+                                  onChange={(event) => {
+                                    const file = event.target.files?.[0];
+                                    event.target.value = "";
+                                    if (file) {
+                                      void handleImportDocumentsXlsx(file);
+                                    }
+                                  }}
+                                />
+                              </div>
+                            </div>
+                            <DocumentList
+                              documents={documents}
+                              selectedId={selectedDocumentId}
+                              checkedIds={highlightedDocumentIds}
+                              onSelect={handleSelectDocument}
+                              onDragDocumentStart={setDraggingDocumentId}
+                              onDragDocumentEnd={() => setDraggingDocumentId(null)}
+                              onDelete={handleDeleteDocument}
+                              deletingDocumentId={deletingDocumentId}
+                              pendingDeleteDocumentId={pendingDeleteDocumentId}
                             />
-                          </div>
-                        </div>
-                        <DocumentList
-                          documents={documents}
-                          selectedId={selectedDocumentId}
-                          checkedIds={highlightedDocumentIds}
-                          onSelect={handleSelectDocument}
-                          onDragDocumentStart={setDraggingDocumentId}
-                          onDragDocumentEnd={() => setDraggingDocumentId(null)}
-                          onDelete={handleDeleteDocument}
-                          deletingDocumentId={deletingDocumentId}
-                          pendingDeleteDocumentId={pendingDeleteDocumentId}
-                        />
-                      </section>
-                      <section className="panel workspace-documents-upload-panel">
-                        <div className="section-header workspace-section-header">
-                          <h2>정책·지침 업로드</h2>
-                          <p>새 문서를 등록하고 구조화 섹션을 생성합니다.</p>
-                        </div>
-                        <DocumentUploadForm
-                          disabled={!session || !isSupabaseConfigured}
-                          onUpload={handleUpload}
-                          setStatus={setStatus}
-                          disabledReason={getUploadDisabledReason(session, isSupabaseConfigured)}
-                        />
-                      </section>
+                          </section>
+                          <section className="panel workspace-documents-upload-panel">
+                            <div className="section-header workspace-section-header">
+                              <h2>정책·지침 업로드</h2>
+                              <p>새 문서를 등록하고 구조화 섹션을 생성합니다.</p>
+                            </div>
+                            <DocumentUploadForm
+                              disabled={!session || !isSupabaseConfigured}
+                              onUpload={handleUpload}
+                              setStatus={setStatus}
+                              disabledReason={getUploadDisabledReason(session, isSupabaseConfigured)}
+                            />
+                          </section>
+                        </>
+                      )}
                     </div>
                     <section className="panel panel-wide workspace-body-card workspace-document-viewer-panel">
-                      <div className="section-header workspace-section-header">
-                        <h2>문서 보기</h2>
-                        <p>선택한 문서의 구조화 섹션과 세부 내용을 바로 확인합니다.</p>
-                      </div>
                       <DocumentViewer
                         documentId={selectedDocumentId}
                         refreshKey={documentPreviewRefreshKey}
@@ -2741,9 +2766,6 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
                       </div>
                       <div className="workspace-history-split">
                         <section className="workspace-history-section">
-                          <div className="compact-section-header">
-                            <h3>실행 기록</h3>
-                          </div>
                           {reviewExecutionHistory.length ? (
                             <div className="review-history-list">
                               {reviewHistoryPageEntries.map((entry) => (
