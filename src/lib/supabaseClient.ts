@@ -3,6 +3,28 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 let supabaseClient: SupabaseClient | null = null;
 const AUTH_STORAGE_KEY = "policy-revision-mgmt-auth-token";
+type SupabaseAuthLock = <Result>(
+  name: string,
+  acquireTimeout: number,
+  fn: () => Promise<Result>,
+) => Promise<Result>;
+const authLockQueues = new Map<string, Promise<unknown>>();
+
+const serializedSupabaseAuthLock: SupabaseAuthLock = (name, _acquireTimeout, fn) => {
+  const previous = authLockQueues.get(name) ?? Promise.resolve();
+  const current = previous.catch(() => undefined).then(fn);
+
+  authLockQueues.set(
+    name,
+    current.finally(() => {
+      if (authLockQueues.get(name) === current) {
+        authLockQueues.delete(name);
+      }
+    }),
+  );
+
+  return current;
+};
 
 export function getSupabaseClient(): SupabaseClient {
   if (supabaseClient) {
@@ -24,6 +46,7 @@ export function getSupabaseClient(): SupabaseClient {
       persistSession: true,
       autoRefreshToken: true,
       detectSessionInUrl: true,
+      lock: serializedSupabaseAuthLock,
     },
   });
 

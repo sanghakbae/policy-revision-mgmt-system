@@ -92,7 +92,11 @@ export function ComparisonReviewPanel({
   const [isLoading, setIsLoading] = useState(false);
   const [isClassifying, setIsClassifying] = useState(false);
   const [savedHistory, setSavedHistory] = useState<AiReportHistoryEntry[]>([]);
+  const [isSavedHistoryLoading, setIsSavedHistoryLoading] = useState(false);
   const [loadedHistoryEntry, setLoadedHistoryEntry] = useState<AiReportHistoryEntry | null>(null);
+  const savedHistoryRef = useRef<AiReportHistoryEntry[]>([]);
+  const savedHistoryLoadPromiseRef = useRef<Promise<AiReportHistoryEntry[]> | null>(null);
+  const handledAutoLoadRequestIdRef = useRef<number | null>(null);
   const selectionSummary = getSelectionSummary(
     selectedDocumentIds.length,
     referenceDocumentIds.length,
@@ -128,15 +132,43 @@ export function ComparisonReviewPanel({
     };
   }, [analysisState.analysisStageStartedAt, analysisState.isAnalyzingSelection]);
 
-  useEffect(() => {
-    listAiReportHistory()
+  function loadSavedHistory() {
+    if (savedHistoryLoadPromiseRef.current) {
+      return savedHistoryLoadPromiseRef.current;
+    }
+
+    setIsSavedHistoryLoading(true);
+    savedHistoryLoadPromiseRef.current = listAiReportHistory()
       .then((entries) => {
+        savedHistoryRef.current = entries;
         setSavedHistory(entries);
+        return entries;
       })
-      .catch((error: Error) => {
-        emitStatus(error.message);
+      .finally(() => {
+        savedHistoryLoadPromiseRef.current = null;
+        setIsSavedHistoryLoading(false);
       });
-  }, [emitStatus]);
+
+    return savedHistoryLoadPromiseRef.current;
+  }
+
+  useEffect(() => {
+    if (viewMode !== "results") {
+      return;
+    }
+
+    let cancelled = false;
+    loadSavedHistory()
+      .catch((error: Error) => {
+        if (!cancelled) {
+          emitStatus(error.message);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [viewMode]);
 
   useEffect(() => {
     if (viewMode !== "results") {
@@ -165,24 +197,59 @@ export function ComparisonReviewPanel({
   ]);
 
   useEffect(() => {
-    if (viewMode !== "history" || !autoLoadHistoryRequest || savedHistory.length === 0) {
+    if (viewMode !== "history" || !autoLoadHistoryRequest) {
       return;
     }
 
-    const entry = findExactHistoryEntry(
-      savedHistory,
-      autoLoadHistoryRequest.selectionSummary,
-      autoLoadHistoryRequest.selectionCounts,
-    );
-
-    if (!entry) {
-      emitStatus("조건에 맞는 저장된 AI 리포트 이력을 찾지 못했습니다.");
+    if (handledAutoLoadRequestIdRef.current === autoLoadHistoryRequest.requestId) {
       return;
     }
+    handledAutoLoadRequestIdRef.current = autoLoadHistoryRequest.requestId;
 
-    setLoadedHistoryEntry(entry);
-    emitStatus(`검토 이력에서 연결된 AI 리포트를 불러왔습니다. (${formatSavedHistoryTimestamp(entry.createdAt)})`);
-  }, [autoLoadHistoryRequest, emitStatus, savedHistory, viewMode]);
+    let cancelled = false;
+
+    const loadEntries = loadSavedHistory();
+
+    loadEntries
+      .then((entries) => {
+        if (cancelled) {
+          return;
+        }
+
+        const exactEntry = findExactHistoryEntry(
+          entries,
+          autoLoadHistoryRequest.selectionSummary,
+          autoLoadHistoryRequest.selectionCounts,
+        );
+        const entry = exactEntry ?? entries[0] ?? null;
+
+        if (!entry) {
+          emitStatus("저장된 AI 리포트 이력이 없습니다.");
+          return;
+        }
+
+        setLoadedHistoryEntry(entry);
+        emitStatus(
+          exactEntry
+            ? `검토 이력에서 연결된 AI 리포트를 불러왔습니다. (${formatSavedHistoryTimestamp(entry.createdAt)})`
+            : `정확히 일치하는 AI 리포트가 없어 최신 저장 리포트를 불러왔습니다. (${formatSavedHistoryTimestamp(entry.createdAt)})`,
+        );
+      })
+      .catch((error: Error) => {
+        if (!cancelled) {
+          emitStatus(error.message);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setIsSavedHistoryLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [autoLoadHistoryRequest?.requestId, viewMode]);
 
   useEffect(() => {
     onOverviewChange?.({
@@ -392,6 +459,7 @@ export function ComparisonReviewPanel({
         </div>
         <SavedAnalysisHistorySection
           entries={savedHistory}
+          isLoading={isSavedHistoryLoading}
           onLoad={handleLoadSavedReport}
           onDelete={handleDeleteSavedReport}
         />
@@ -417,6 +485,7 @@ export function ComparisonReviewPanel({
         {shouldShowHistory ? (
           <SavedAnalysisHistorySection
             entries={savedHistory}
+            isLoading={isSavedHistoryLoading}
             onLoad={handleLoadSavedReport}
             onDelete={handleDeleteSavedReport}
           />
@@ -524,6 +593,7 @@ export function ComparisonReviewPanel({
       {shouldShowHistory ? (
         <SavedAnalysisHistorySection
           entries={savedHistory}
+          isLoading={isSavedHistoryLoading}
           onLoad={handleLoadSavedReport}
           onDelete={handleDeleteSavedReport}
         />
@@ -739,6 +809,7 @@ function AiGuidancePanel(input: {
 
 function SavedAnalysisHistorySection(input: {
   entries: AiReportHistoryEntry[];
+  isLoading?: boolean;
   onLoad: (entryId: string) => void;
   onDelete: (entryId: string) => void;
 }) {
@@ -754,7 +825,12 @@ function SavedAnalysisHistorySection(input: {
 
   return (
     <section className="review-column comparison-history-shell">
-      {input.entries.length === 0 ? (
+      {input.isLoading ? (
+        <div className="info-card">
+          <strong>저장된 AI 리포트 이력을 불러오는 중입니다.</strong>
+          <p className="helper-text detailed-empty-reason">잠시 후 선택한 검토 이력의 리포트를 바로 표시합니다.</p>
+        </div>
+      ) : input.entries.length === 0 ? (
         <div className="info-card">
           <strong>저장된 AI 리포트 이력이 없습니다.</strong>
           <p className="helper-text detailed-empty-reason">AI 비교 결과가 생성되면 `결과 저장`으로 보관할 수 있습니다.</p>

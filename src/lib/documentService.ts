@@ -149,6 +149,7 @@ export async function uploadDocument(input: {
         version_number: 1,
         raw_text: fileText,
         parse_warnings: parseResult.warnings,
+        effective_date: deriveDocumentMetadata(fileText).revisionDate,
       })
       .select("id")
       .single();
@@ -278,6 +279,7 @@ export async function uploadRawTextDocument(input: {
       version_number: 1,
       raw_text: input.rawText,
       parse_warnings: parseResult.warnings,
+      effective_date: deriveDocumentMetadata(input.rawText).revisionDate,
     })
     .select("id, raw_text")
     .single();
@@ -405,6 +407,7 @@ export async function uploadStructuredRowsDocument(input: {
       version_number: 1,
       raw_text: rawText,
       parse_warnings: [STRUCTURED_XLSX_IMPORT_WARNING],
+      effective_date: deriveDocumentMetadata(rawText).revisionDate,
     })
     .select("id, raw_text")
     .single();
@@ -746,9 +749,9 @@ export async function listDocuments(): Promise<DocumentSummary[]> {
   await ensureAuthenticatedSession();
   const supabase = getSupabaseClient();
   const { data, error } = await supabase
-    .from("policy_documents")
+    .from("policy_document_summary_view")
     .select(
-      "id, title, document_type, created_at, policy_document_versions(id, version_number, created_at, raw_text, policy_document_sections(count))",
+      "id, title, document_type, version_number, version_id, created_at, effective_date, section_count",
     )
     .order("created_at", { ascending: false });
 
@@ -756,23 +759,7 @@ export async function listDocuments(): Promise<DocumentSummary[]> {
     throwAuthAwareError(error.message);
   }
 
-  return (data ?? []).map((row) => {
-    const latestVersion = [...(row.policy_document_versions ?? [])].sort(
-      (left, right) => right.version_number - left.version_number,
-    )[0];
-    const metadata = latestVersion?.raw_text ? deriveDocumentMetadata(latestVersion.raw_text) : null;
-
-    return {
-      id: row.id,
-      title: row.title,
-      document_type: row.document_type,
-      version_number: latestVersion?.version_number ?? 0,
-      version_id: latestVersion?.id,
-      created_at: latestVersion?.created_at ?? row.created_at,
-      effective_date: metadata?.revisionDate ?? null,
-      section_count: latestVersion?.policy_document_sections?.[0]?.count ?? 0,
-    };
-  }).sort(compareDocumentSummaryForList);
+  return ((data ?? []) as DocumentSummary[]).sort(compareDocumentSummaryForList);
 }
 
 function compareDocumentSummaryForList(left: DocumentSummary, right: DocumentSummary) {
@@ -1330,6 +1317,7 @@ export async function saveStructuredSections(input: {
     .update({
       raw_text: rebuiltRawText,
       parse_warnings: parseResult.warnings,
+      effective_date: deriveDocumentMetadata(rebuiltRawText).revisionDate,
     })
     .eq("id", input.versionId)
     .select("id, raw_text")
@@ -1456,9 +1444,9 @@ export async function listLawVersions(): Promise<LawVersionSummary[]> {
   await ensureAuthenticatedSession();
   const supabase = getSupabaseClient();
   const { data, error } = await supabase
-    .from("policy_law_versions")
+    .from("policy_law_version_summary_view")
     .select(
-      "id, law_source_id, version_label, effective_date, created_at, policy_law_sources!inner(source_title, source_link), policy_law_sections(count)",
+      "id, law_source_id, source_title, source_link, version_label, effective_date, created_at, section_count",
     )
     .order("created_at", { ascending: false });
 
@@ -1466,22 +1454,7 @@ export async function listLawVersions(): Promise<LawVersionSummary[]> {
     throwAuthAwareError(error.message);
   }
 
-  return (data ?? []).map((row) => {
-    const lawSource = Array.isArray(row.policy_law_sources)
-      ? row.policy_law_sources[0]
-      : row.policy_law_sources;
-
-    return {
-      id: row.id,
-      law_source_id: row.law_source_id,
-      source_title: lawSource?.source_title ?? null,
-      source_link: lawSource?.source_link ?? "",
-      version_label: row.version_label,
-      effective_date: row.effective_date,
-      created_at: row.created_at,
-      section_count: row.policy_law_sections?.[0]?.count ?? 0,
-    };
-  });
+  return (data ?? []) as LawVersionSummary[];
 }
 
 export async function getLawDetail(

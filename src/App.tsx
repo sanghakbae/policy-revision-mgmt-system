@@ -103,6 +103,20 @@ const DEFAULT_SECURITY_SETTINGS: SecuritySettings = {
   sessionIdleTimeoutMinutes: 60,
 };
 const SESSION_ACTIVITY_REFRESH_THROTTLE_MS = 15 * 1000;
+type WorkspaceDataLoadState = {
+  documents: boolean;
+  lawVersions: boolean;
+  comparisonRuns: boolean;
+  workspaceFavorites: boolean;
+  reviewExecutionHistory: boolean;
+};
+const EMPTY_WORKSPACE_DATA_LOAD_STATE: WorkspaceDataLoadState = {
+  documents: false,
+  lawVersions: false,
+  comparisonRuns: false,
+  workspaceFavorites: false,
+  reviewExecutionHistory: false,
+};
 
 function getPortalWorkspaceSection(
   embeddedContext?: { project?: string; view?: string; embedded?: boolean },
@@ -201,6 +215,9 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
   );
   const [isWorkspaceSidebarCollapsed, setIsWorkspaceSidebarCollapsed] = useState(false);
   const [isDocumentsPanelCollapsed, setIsDocumentsPanelCollapsed] = useState(false);
+  const [workspaceDataLoadState, setWorkspaceDataLoadState] = useState<WorkspaceDataLoadState>(
+    EMPTY_WORKSPACE_DATA_LOAD_STATE,
+  );
   const [appNotice, setAppNoticeState] = useState<AppNotice | null>(null);
   const [comparisonOverview, setComparisonOverview] = useState<ComparisonReviewOverviewSnapshot | null>(null);
   const [comparisonAnalysisState, setComparisonAnalysisState] = useState<ComparisonReviewAnalysisState>(
@@ -617,122 +634,151 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
       setLawPreviewRefreshKey(0);
       setWorkspaceSelectionHydrated(false);
       setWorkspaceFavorites([]);
+      setWorkspaceDataLoadState(EMPTY_WORKSPACE_DATA_LOAD_STATE);
       return;
     }
 
     let cancelled = false;
     const savedSelection = readWorkspaceSelection(sessionUserId);
+    const needs = getWorkspaceDataRequirements(activeWorkspaceSection);
+    const requests: Promise<void>[] = [];
+    const loadErrors: string[] = [];
+    const loadStartedAt = performance.now();
 
-    const documentsLoadStartedAt = performance.now();
+    if (needs.documents && !workspaceDataLoadState.documents) {
+      requests.push(
+        listDocuments()
+          .then((documentItems) => {
+            if (cancelled) {
+              return;
+            }
+            setDocuments(documentItems);
+            setSelectedDocumentId((current) => {
+              const nextSelectedId =
+                workspaceSelectionHydrated && current
+                  ? current
+                  : (savedSelection?.selectedDocumentId ?? null);
+              return nextSelectedId && documentItems.some((item) => item.id === nextSelectedId)
+                ? nextSelectedId
+                : null;
+            });
+            setCheckedDocumentIds((current) =>
+              current.filter((id) => documentItems.some((item) => item.id === id)),
+            );
+            setComparisonTargetDocumentIds((current) =>
+              filterExistingIds(
+                workspaceSelectionHydrated ? current : (savedSelection?.targetDocumentIds ?? []),
+                documentItems,
+              ),
+            );
+            setComparisonReferenceDocumentIds((current) =>
+              filterExistingIds(
+                workspaceSelectionHydrated ? current : (savedSelection?.referenceDocumentIds ?? []),
+                documentItems,
+              ),
+            );
+            setWorkspaceDataLoadState((current) => ({ ...current, documents: true }));
+          })
+          .catch((error: Error) => {
+            loadErrors.push(`문서 목록: ${error.message}`);
+          }),
+      );
+    }
 
-    void listDocuments()
-      .then((documentItems) => {
-        if (cancelled) {
-          return;
-        }
-        const documentLoadDurationMs = Math.round(performance.now() - documentsLoadStartedAt);
-        console.info(`[bootstrap] listDocuments loaded ${documentItems.length} documents in ${documentLoadDurationMs}ms`);
-        setDocuments(documentItems);
-        setSelectedDocumentId((current) => {
-          const nextSelectedId =
-            workspaceSelectionHydrated && current
-              ? current
-              : (savedSelection?.selectedDocumentId ?? null);
-          return nextSelectedId && documentItems.some((item) => item.id === nextSelectedId)
-            ? nextSelectedId
-            : null;
-        });
-        setCheckedDocumentIds((current) =>
-          current.filter((id) => documentItems.some((item) => item.id === id)),
-        );
-        setComparisonTargetDocumentIds((current) =>
-          filterExistingIds(
-            workspaceSelectionHydrated ? current : (savedSelection?.targetDocumentIds ?? []),
-            documentItems,
-          ),
-        );
-        setComparisonReferenceDocumentIds((current) =>
-          filterExistingIds(
-            workspaceSelectionHydrated ? current : (savedSelection?.referenceDocumentIds ?? []),
-            documentItems,
-          ),
-        );
-      })
-      .catch((error: Error) => {
-        if (cancelled) {
-          return;
-        }
-        const documentLoadDurationMs = Math.round(performance.now() - documentsLoadStartedAt);
-        console.error(`[bootstrap] listDocuments failed after ${documentLoadDurationMs}ms: ${error.message}`);
-        setAppNotice({
-          tone: "danger",
-          label: "문서 목록 로드 오류",
-          title: "문서 목록을 불러오지 못했습니다.",
-          detail: `${error.message}\n문서 목록 로드 시간: ${documentLoadDurationMs}ms`,
-          actions: ["인증 상태를 확인하세요.", "Supabase 연결과 문서 테이블 상태를 확인하세요."],
-          debug: [`document list bootstrap error=${error.message}`, `document list load=${documentLoadDurationMs}ms`],
-        });
-      });
+    if (needs.lawVersions && !workspaceDataLoadState.lawVersions) {
+      requests.push(
+        listLawVersions()
+          .then((lawVersionItems) => {
+            if (cancelled) {
+              return;
+            }
+            setLawVersions(lawVersionItems);
+            setSelectedLawVersionIds((current) =>
+              filterExistingIds(
+                workspaceSelectionHydrated ? current : (savedSelection?.lawVersionIds ?? []),
+                lawVersionItems,
+              ),
+            );
+            setWorkspaceDataLoadState((current) => ({ ...current, lawVersions: true }));
+          })
+          .catch((error: Error) => {
+            loadErrors.push(`법령 목록: ${error.message}`);
+          }),
+      );
+    }
 
-    const bootstrapLoadStartedAt = performance.now();
+    if (needs.comparisonRuns && !workspaceDataLoadState.comparisonRuns) {
+      requests.push(
+        listComparisonRuns()
+          .then((comparisonItems) => {
+            if (cancelled) {
+              return;
+            }
+            setComparisonRuns(comparisonItems);
+            setSelectedComparisonRunId((current) =>
+              current && comparisonItems.some((item) => item.id === current) ? current : null,
+            );
+            setWorkspaceDataLoadState((current) => ({ ...current, comparisonRuns: true }));
+          })
+          .catch((error: Error) => {
+            loadErrors.push(`검토 결과: ${error.message}`);
+          }),
+      );
+    }
 
-    void Promise.allSettled([
-      listLawVersions(),
-      listComparisonRuns(),
-      listWorkspaceFavorites(),
-      listReviewExecutionHistory(),
-    ]).then((results) => {
+    if (needs.workspaceFavorites && !workspaceDataLoadState.workspaceFavorites) {
+      requests.push(
+        listWorkspaceFavorites()
+          .then((favorites) => {
+            if (cancelled) {
+              return;
+            }
+            setWorkspaceFavorites(favorites);
+            setWorkspaceDataLoadState((current) => ({ ...current, workspaceFavorites: true }));
+          })
+          .catch((error: Error) => {
+            loadErrors.push(`저장된 즐겨찾기: ${error.message}`);
+          }),
+      );
+    }
+
+    if (needs.reviewExecutionHistory && !workspaceDataLoadState.reviewExecutionHistory) {
+      requests.push(
+        listReviewExecutionHistory()
+          .then((historyItems) => {
+            if (cancelled) {
+              return;
+            }
+            setReviewExecutionHistory(historyItems);
+            setWorkspaceDataLoadState((current) => ({ ...current, reviewExecutionHistory: true }));
+          })
+          .catch((error: Error) => {
+            loadErrors.push(`실행 이력: ${error.message}`);
+          }),
+      );
+    }
+
+    if (requests.length === 0) {
+      return;
+    }
+
+    void Promise.allSettled(requests).then(() => {
       if (cancelled) {
         return;
       }
-
-      const [lawVersionsResult, comparisonRunsResult, favoritesResult, reviewHistoryResult] = results;
-      const bootstrapErrors: string[] = [];
-
-      if (lawVersionsResult.status === "fulfilled") {
-        setLawVersions(lawVersionsResult.value);
-        setSelectedLawVersionIds((current) =>
-          filterExistingIds(
-            workspaceSelectionHydrated ? current : (savedSelection?.lawVersionIds ?? []),
-            lawVersionsResult.value,
-          ),
-        );
-      } else {
-        bootstrapErrors.push(`법령 목록: ${lawVersionsResult.reason instanceof Error ? lawVersionsResult.reason.message : "로드 실패"}`);
+      if (needs.documents || needs.lawVersions) {
+        setWorkspaceSelectionHydrated(true);
       }
 
-      if (comparisonRunsResult.status === "fulfilled") {
-        setComparisonRuns(comparisonRunsResult.value);
-        setSelectedComparisonRunId((current) =>
-          current && comparisonRunsResult.value.some((item) => item.id === current) ? current : null,
-        );
-      } else {
-        bootstrapErrors.push(`검토 결과: ${comparisonRunsResult.reason instanceof Error ? comparisonRunsResult.reason.message : "로드 실패"}`);
-      }
-
-      if (favoritesResult.status === "fulfilled") {
-        setWorkspaceFavorites(favoritesResult.value);
-      } else {
-        bootstrapErrors.push(`저장된 즐겨찾기: ${favoritesResult.reason instanceof Error ? favoritesResult.reason.message : "로드 실패"}`);
-      }
-
-      if (reviewHistoryResult.status === "fulfilled") {
-        setReviewExecutionHistory(reviewHistoryResult.value);
-      } else {
-        bootstrapErrors.push(`실행 이력: ${reviewHistoryResult.reason instanceof Error ? reviewHistoryResult.reason.message : "로드 실패"}`);
-      }
-
-      setWorkspaceSelectionHydrated(true);
-
-      if (bootstrapErrors.length > 0) {
-        const bootstrapLoadDurationMs = Math.round(performance.now() - bootstrapLoadStartedAt);
+      if (loadErrors.length > 0) {
+        const loadDurationMs = Math.round(performance.now() - loadStartedAt);
         setAppNotice({
           tone: "warning",
           label: "부분 로드 오류",
-          title: "일부 작업 공간 데이터만 불러왔습니다.",
-          detail: `${bootstrapErrors.join("\n")}\n추가 데이터 로드 시간: ${bootstrapLoadDurationMs}ms`,
-          actions: ["문서 목록은 사용할 수 있습니다.", "필요하면 새로고침 후 다시 확인하세요."],
-          debug: [...bootstrapErrors, `bootstrap tail load=${bootstrapLoadDurationMs}ms`],
+          title: "현재 메뉴 데이터 일부를 불러오지 못했습니다.",
+          detail: `${loadErrors.join("\n")}\n로드 시간: ${loadDurationMs}ms`,
+          actions: ["필요한 메뉴에 진입할 때 데이터만 다시 불러옵니다.", "인증 상태와 Supabase 연결을 확인하세요."],
+          debug: [...loadErrors, `lazy workspace load=${loadDurationMs}ms`, `section=${activeWorkspaceSection}`],
         });
       }
     });
@@ -740,7 +786,13 @@ export default function App({ embeddedContext }: { embeddedContext?: { project?:
     return () => {
       cancelled = true;
     };
-  }, [sessionUserId, isSupabaseConfigured]);
+  }, [
+    activeWorkspaceSection,
+    sessionUserId,
+    isSupabaseConfigured,
+    workspaceDataLoadState,
+    workspaceSelectionHydrated,
+  ]);
 
   useEffect(() => {
     const hasSelectionContext =
@@ -3384,6 +3436,43 @@ function getWorkspaceSectionMeta(section: WorkspaceSection) {
     title: "검토 결과",
     description: "1단계, 2단계, 3단계 결과를 프레임 단위로 검토합니다.",
   };
+}
+
+function getWorkspaceDataRequirements(section: WorkspaceSection): WorkspaceDataLoadState {
+  switch (section) {
+    case "dashboard":
+      return {
+        ...EMPTY_WORKSPACE_DATA_LOAD_STATE,
+        documents: true,
+        lawVersions: true,
+        reviewExecutionHistory: true,
+      };
+    case "documents":
+      return {
+        ...EMPTY_WORKSPACE_DATA_LOAD_STATE,
+        documents: true,
+      };
+    case "comparison":
+      return {
+        ...EMPTY_WORKSPACE_DATA_LOAD_STATE,
+        documents: true,
+        lawVersions: true,
+        workspaceFavorites: true,
+      };
+    case "results":
+      return {
+        ...EMPTY_WORKSPACE_DATA_LOAD_STATE,
+        comparisonRuns: true,
+      };
+    case "history":
+      return {
+        ...EMPTY_WORKSPACE_DATA_LOAD_STATE,
+        reviewExecutionHistory: true,
+      };
+    case "settings":
+    default:
+      return EMPTY_WORKSPACE_DATA_LOAD_STATE;
+  }
 }
 
 function getUploadDisabledReason(session: Session | null, isSupabaseConfigured: boolean) {
